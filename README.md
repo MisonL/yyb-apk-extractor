@@ -4,11 +4,9 @@
 >
 > 无需浏览器，零第三方依赖，支持代理，自动下载
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Node.js-%3E%3D16.0.0-339933?logo=node.js&logoColor=white" alt="Node.js >= 16.0.0">
-  <img src="https://img.shields.io/badge/License-ISC-blue.svg" alt="License: ISC">
-  <img src="https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg" alt="Platform">
-</p>
+[![Node.js >= 16.0.0](https://img.shields.io/badge/Node.js-%3E%3D16.0.0-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![License: ISC](https://img.shields.io/badge/License-ISC-blue.svg)](./LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)]()
 
 ---
 
@@ -26,7 +24,7 @@
 
 ---
 
-## 📦 环境要求
+## 环境要求
 
 | 项目 | 要求 |
 |---|---|
@@ -81,7 +79,7 @@ HTTPS_PROXY / https_proxy / HTTP_PROXY / http_proxy / ALL_PROXY / all_proxy
 
 ---
 
-## 📋 示例
+## 示例
 
 ### 1. 提取下载链接
 
@@ -185,6 +183,6 @@ node index.js com.example.app --proxy=socks5h://127.0.0.1:7890
 
 ---
 
-## 📄 License
+## License
 
 [ISC](./LICENSE)
