@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# Download outputs
+downloads/
+*.apk
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Runtime
+.tmp/

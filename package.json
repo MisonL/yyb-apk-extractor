@@ -1,0 +1,43 @@
+{
+  "name": "yyb-apk-extractor",
+  "version": "1.0.0",
+  "description": "从腾讯应用宝官网提取安卓 APK 直链的纯命令行工具，无需浏览器，支持 HTTP/HTTPS/SOCKS 代理",
+  "main": "index.js",
+  "bin": {
+    "yyb-apk-extractor": "./index.js"
+  },
+  "files": [
+    "index.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --check index.js",
+    "start": "node index.js"
+  },
+  "keywords": [
+    "yyb",
+    "apk",
+    "download",
+    "extractor",
+    "proxy",
+    "cli",
+    "qq",
+    "android"
+  ],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "dependencies": {},
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MisonL/yyb-apk-extractor.git"
+  },
+  "bugs": {
+    "url": "https://github.com/MisonL/yyb-apk-extractor/issues"
+  },
+  "homepage": "https://github.com/MisonL/yyb-apk-extractor#readme"
+}

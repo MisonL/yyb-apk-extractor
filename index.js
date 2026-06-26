@@ -1,0 +1,910 @@
+#!/usr/bin/env node
+
+/**
+ * 应用宝 APK 下载链接提取器（纯命令行版）
+ *
+ * 不依赖浏览器，通过应用宝移动端页面接口获取 APK 直链。
+ * 使用代理时需要系统已安装 curl。
+ *
+ * 使用方法:
+ *   node index.js <包名或应用宝详情页URL> [选项]
+ *
+ *   包名或URL          安卓包名(如 com.example.app) 或应用宝详情页 URL
+ *   --proxy=地址        设置代理, 支持 http/https/socks5/socks5h,
+ *                       建议 Clash/V2Ray 混合端口用 http:// 或 socks5h://（远程 DNS）
+ *   --no-proxy          忽略环境变量代理
+ *   --download-dir=目录 提取链接后自动下载 APK 到指定目录
+ *   --timeout=毫秒      网络超时时间(默认 30000)。fetch 阶段为请求总时长；
+ *                       下载阶段为连接/断流检测时长，不限制大文件总下载时间
+ *   --verbose, -v       显示详细调试日志
+ *   --version, -V       显示版本号
+ *   --no-color          强制禁用 ANSI 颜色输出
+ *
+ * 示例:
+ *   node index.js com.example.app
+ *   node index.js https://sj.qq.com/appdetail/com.example.app
+ *   node index.js com.example.app --proxy=http://127.0.0.1:7890
+ *   node index.js com.example.app --proxy=socks5h://127.0.0.1:7890
+ *   node index.js com.example.app --download-dir=./downloads
+ *
+ * 代理说明:
+ *   - http://  最稳，适合 Clash/V2Ray 混合代理端口
+ *   - socks5h://  SOCKS5 并让代理服务器解析 DNS，避免本地 DNS 失败
+ *   - 避免使用 socks5://（本地解析 DNS，易在受限网络中失败）
+ *
+ * 环境变量:
+ *   HTTPS_PROXY / https_proxy / HTTP_PROXY / http_proxy / ALL_PROXY / all_proxy : 默认代理（按优先级排序）
+ */
+
+const https = require('https');
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { spawnSync } = require('child_process');
+
+// 版本号从 package.json 读取，保持单一来源
+let VERSION = '1.0.0';
+try {
+  VERSION = require('./package.json').version;
+} catch {
+  // ignore
+}
+
+// 命令查找缓存，避免同一进程内重复 fork which/where
+const commandCache = new Map();
+
+const MOBILE_USER_AGENT =
+  'Mozilla/5.0 (Linux; Android 10; SM-G960U) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36';
+const PROXY_ENV_KEYS = ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'];
+
+// 终端颜色支持：非 TTY 或设置 NO_COLOR/--no-color 时禁用，保证管道输出干净
+const noColorFlag = process.argv.includes('--no-color');
+const useColor = process.stderr.isTTY && !process.env.NO_COLOR && !noColorFlag;
+const c = useColor
+  ? {
+      reset: '\x1b[0m',
+      bold: '\x1b[1m',
+      dim: '\x1b[2m',
+      red: '\x1b[31m',
+      green: '\x1b[32m',
+      yellow: '\x1b[33m',
+      blue: '\x1b[34m',
+      cyan: '\x1b[36m',
+    }
+  : Object.fromEntries(['reset', 'bold', 'dim', 'red', 'green', 'yellow', 'blue', 'cyan'].map((k) => [k, '']));
+
+function padEnd(str, len) {
+  const visualLen = str.replace(/\x1b\[\d+m/g, '').length;
+  return str + ' '.repeat(Math.max(0, len - visualLen));
+}
+
+function opt(name, desc, extra = '') {
+  const line = `  ${c.yellow}${padEnd(name, 22)}${c.reset} ${desc}`;
+  return extra ? [line, `  ${padEnd('', 22)} ${extra}`] : [line];
+}
+
+function showVersion() {
+  console.log(VERSION);
+  process.exit(0);
+}
+
+function showHelp() {
+  const title = `${c.bold}${c.cyan}应用宝 APK 下载链接提取器${c.reset} ${c.dim}v${VERSION}${c.reset}`;
+  const lines = [
+    '',
+    title,
+    '',
+    `${c.bold}用法:${c.reset}`,
+    `  ${c.yellow}node index.js${c.reset} ${c.green}<包名或应用宝详情页URL>${c.reset} [选项]`,
+    '',
+    `${c.bold}选项:${c.reset}`,
+    ...opt('--proxy=地址', '设置代理, 支持 http/https/socks5/socks5h', `${c.dim}建议 Clash/V2Ray 混合端口用 http:// 或 socks5h://${c.reset}`),
+    ...opt('--no-proxy', '忽略环境变量代理'),
+    ...opt('--download-dir=目录', '提取链接后自动下载 APK 到指定目录'),
+    ...opt('--timeout=毫秒', '网络超时时间 (默认 30000)', `${c.dim}fetch 阶段为请求总时长; 下载阶段为连接/断流检测时长${c.reset}`),
+    ...opt('--verbose, -v', '显示详细调试日志'),
+    ...opt('--version, -V', '显示版本号'),
+    ...opt('--no-color', '强制禁用 ANSI 颜色输出'),
+    ...opt('--help, -h', '显示本帮助信息'),
+    '',
+    `${c.bold}示例:${c.reset}`,
+    `  ${c.dim}# 直接输入包名${c.reset}`,
+    `  ${c.yellow}node index.js${c.reset} ${c.green}com.example.app${c.reset}`,
+    '',
+    `  ${c.dim}# 输入应用宝详情页 URL${c.reset}`,
+    `  ${c.yellow}node index.js${c.reset} ${c.green}https://sj.qq.com/appdetail/com.example.app${c.reset}`,
+    '',
+    `  ${c.dim}# 使用 HTTP 代理 (推荐)${c.reset}`,
+    `  ${c.yellow}node index.js${c.reset} ${c.green}com.example.app${c.reset} --proxy=${c.cyan}http://127.0.0.1:7890${c.reset}`,
+    '',
+    `  ${c.dim}# 使用 SOCKS5h 代理 (远程 DNS)${c.reset}`,
+    `  ${c.yellow}node index.js${c.reset} ${c.green}com.example.app${c.reset} --proxy=${c.cyan}socks5h://127.0.0.1:7890${c.reset}`,
+    '',
+    `  ${c.dim}# 自动下载到指定目录${c.reset}`,
+    `  ${c.yellow}node index.js${c.reset} ${c.green}com.example.app${c.reset} --download-dir=${c.cyan}./downloads${c.reset}`,
+    '',
+    `${c.bold}环境变量:${c.reset}`,
+    `  ${c.cyan}HTTPS_PROXY${c.reset} / ${c.cyan}https_proxy${c.reset} / ${c.cyan}HTTP_PROXY${c.reset} / ${c.cyan}http_proxy${c.reset}`,
+    `  ${c.dim}按上述优先级自动读取默认代理${c.reset}`,
+    '',
+  ];
+  console.log(lines.join('\n'));
+  process.exit(0);
+}
+
+function parseArgs(argv) {
+  const args = argv.slice(2);
+  let pkgNameOrUrl = '';
+  const proxyFromEnv =
+    process.env.HTTPS_PROXY ||
+    process.env.https_proxy ||
+    process.env.HTTP_PROXY ||
+    process.env.http_proxy ||
+    process.env.ALL_PROXY ||
+    process.env.all_proxy ||
+    '';
+  const options = {
+    proxy: '',
+    ignoreProxyEnv: false,
+    timeout: 30000,
+    verbose: false,
+    downloadDir: '',
+  };
+
+  for (const arg of args) {
+    if (arg === '--help' || arg === '-h') {
+      showHelp();
+    } else if (arg === '--version' || arg === '-V') {
+      showVersion();
+    } else if (arg === '--no-color') {
+      // 已在顶部处理，解析阶段直接跳过
+    } else if (arg === '--no-proxy') {
+      options.proxy = '';
+      options.ignoreProxyEnv = true;
+    } else if (arg.startsWith('--proxy=')) {
+      options.proxy = validateProxy(arg.slice('--proxy='.length));
+      options.ignoreProxyEnv = false;
+    } else if (arg.startsWith('--timeout=')) {
+      const raw = arg.slice('--timeout='.length);
+      const parsed = Number(raw);
+      if (!Number.isInteger(parsed) || parsed <= 0 || String(parsed) !== raw) {
+        throw new Error('--timeout 必须是正整数毫秒');
+      }
+      options.timeout = parsed;
+    } else if (arg.startsWith('--download-dir=')) {
+      options.downloadDir = arg.slice('--download-dir='.length);
+    } else if (arg === '--verbose' || arg === '-v') {
+      options.verbose = true;
+    } else if (arg.startsWith('-')) {
+      throw new Error(`未知选项: ${arg}`);
+    } else {
+      if (pkgNameOrUrl) {
+        throw new Error(`只能提供一个包名或 URL，多余参数: ${arg}`);
+      }
+      pkgNameOrUrl = arg;
+    }
+  }
+
+  if (!pkgNameOrUrl) {
+    throw new Error('请提供包名或应用宝详情页 URL');
+  }
+
+  const MAX_INPUT_LEN = 2048;
+  if (pkgNameOrUrl.length > MAX_INPUT_LEN) {
+    throw new Error(`输入过长 (>${MAX_INPUT_LEN} 字符)`);
+  }
+
+  if (options.downloadDir !== '' && !options.downloadDir.trim()) {
+    throw new Error('--download-dir 不能为空');
+  }
+
+  const downloadDirSegments = options.downloadDir.split(/[\\/]+/).filter(Boolean);
+  if (downloadDirSegments.includes('..')) {
+    throw new Error('--download-dir 不能包含路径遍历 ..');
+  }
+
+  // 若显式传入空值 --download-dir=，语义不明确，要求用 . 表示当前目录
+  if (args.some((a) => a === '--download-dir=')) {
+    throw new Error('--download-dir= 值不能为空，如需当前目录请使用 --download-dir=.');
+  }
+
+  const resolvedDownloadDir = path.resolve(options.downloadDir);
+  if (options.downloadDir && resolvedDownloadDir === path.parse(resolvedDownloadDir).root) {
+    throw new Error('--download-dir 不能为根目录');
+  }
+
+  if (!options.proxy && !options.ignoreProxyEnv && proxyFromEnv) {
+    options.proxy = validateProxy(proxyFromEnv);
+  }
+
+  return { pkgNameOrUrl, options };
+}
+
+function normalizeUrl(input) {
+  const trimmed = input.trim();
+  const lower = trimmed.toLowerCase();
+  if (lower.startsWith('http://') || lower.startsWith('https://')) {
+    // 规范化协议大小写，避免 detailUrl 输出 HTTP:// 等异常格式
+    const protocolEnd = trimmed.indexOf('://');
+    return trimmed.slice(0, protocolEnd).toLowerCase() + trimmed.slice(protocolEnd);
+  }
+  const pkgName = trimmed.replace(/^\/+|\/+$/g, '');
+  return `https://sj.qq.com/appdetail/${pkgName}`;
+}
+
+function isValidPkgName(name) {
+  // Android 包名基本规则：以字母开头，段内可含字母/数字/下划线，至少两段
+  return /^[a-zA-Z][a-zA-Z0-9_]*(\.[a-zA-Z][a-zA-Z0-9_]*)+$/.test(name);
+}
+
+function getPkgName(url) {
+  try {
+    const u = new URL(url);
+    // 拒绝路径中包含 .. 的 URL，防止路径遍历
+    if (u.pathname.includes('..')) return '';
+
+    // 如果是 simple.jsp URL，从 query 参数提取 pkgname
+    if (u.pathname.toLowerCase().endsWith('simple.jsp')) {
+      const pkg = u.searchParams.get('pkgname');
+      if (pkg && isValidPkgName(pkg)) return pkg;
+      return '';
+    }
+    const parts = u.pathname.split('/').filter(Boolean);
+    const last = parts[parts.length - 1] || '';
+    return isValidPkgName(last) ? last : '';
+  } catch {
+    return '';
+  }
+}
+
+function isAria2cProxySupported(proxy) {
+  // aria2c --all-proxy 支持 http:// 与 https:// 代理；socks5/socks5h 等会报 unrecognized proxy format
+  if (!proxy) return true;
+  return /^https?:\/\//i.test(proxy);
+}
+
+function validateProxy(proxy) {
+  if (!proxy) return '';
+  let parsed;
+  try {
+    parsed = new URL(proxy);
+  } catch {
+    throw new Error(`--proxy 不是有效 URL: ${maskUrl(proxy)}`);
+  }
+  if (!['http:', 'https:', 'socks5:', 'socks5h:'].includes(parsed.protocol)) {
+    throw new Error(`--proxy 仅支持 http/https/socks5/socks5h 协议: ${maskUrl(proxy)}`);
+  }
+  if (!parsed.hostname || !parsed.port) {
+    throw new Error(`--proxy 必须包含主机和端口: ${maskUrl(proxy)}`);
+  }
+  if ((parsed.pathname && parsed.pathname !== '/') || parsed.search || parsed.hash) {
+    throw new Error(`--proxy 不能包含路径、查询串或片段: ${maskUrl(proxy)}`);
+  }
+  return parsed.toString();
+}
+
+function createChildEnv(options) {
+  if (!options.ignoreProxyEnv && !options.proxy) {
+    return process.env;
+  }
+
+  const env = { ...process.env };
+  for (const key of PROXY_ENV_KEYS) {
+    delete env[key];
+  }
+
+  if (options.proxy) {
+    for (const key of PROXY_ENV_KEYS) {
+      env[key] = options.proxy;
+    }
+  }
+
+  return env;
+}
+
+function assertAllowedHttpUrl(value, label) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`${label} 不是有效 URL: ${value}`);
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`${label} 仅支持 http/https 协议: ${value}`);
+  }
+  assertAllowedHostname(parsed.hostname, label);
+  return parsed;
+}
+
+function maskUrl(value) {
+  try {
+    const u = new URL(value);
+    if (u.username) u.username = '***';
+    if (u.password) u.password = '***';
+    return u.toString();
+  } catch {
+    return value;
+  }
+}
+
+function log(options, ...args) {
+  if (options.verbose) {
+    console.error(`${c.dim}[debug]${c.reset}`, ...args);
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function retrySync(fn, retries = 3) {
+  // 同步重试：不引入 sleep，立即重试以简化实现；网络操作本身耗时已足够间隔
+  let lastError;
+  for (let i = 0; i < retries; i++) {
+    try {
+      return fn();
+    } catch (e) {
+      lastError = e;
+    }
+  }
+  throw lastError;
+}
+
+async function retryAsync(fn, retries = 3, delayMs = 1000) {
+  let lastError;
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastError = e;
+      if (i < retries - 1) {
+        await sleep(delayMs);
+      }
+    }
+  }
+  throw lastError;
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return '未知大小';
+  if (bytes === 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
+  const k = 1024;
+  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), units.length - 1);
+  return `${(bytes / Math.pow(k, i)).toFixed(2)} ${units[i]}`;
+}
+
+function findCommand(names) {
+  const key = names.join('|');
+  if (commandCache.has(key)) return commandCache.get(key);
+
+  for (const name of names) {
+    try {
+      // 直接在 PATH 中执行 --version，成功退出视为可用
+      const res = spawnSync(name, ['--version'], { stdio: 'ignore' });
+      if (res.status === 0) {
+        commandCache.set(key, name);
+        return name;
+      }
+    } catch {
+      // ignore
+    }
+  }
+  commandCache.set(key, null);
+  return null;
+}
+
+function assertAllowedHostname(hostname, context) {
+  const h = hostname.toLowerCase();
+  if (!h.endsWith('.qq.com') && h !== 'qq.com') {
+    throw new Error(`${context} 非腾讯域名 (${hostname})，已拒绝`);
+  }
+}
+
+function fetchHtmlWithNode(url, options, redirectCount = 0) {
+  if (redirectCount > 5) {
+    return Promise.reject(new Error('重定向次数过多（>5），疑似配置错误'));
+  }
+  return new Promise((resolve, reject) => {
+    try {
+      assertAllowedHttpUrl(url, '请求');
+    } catch (e) {
+      return reject(e.message ? new Error(e.message) : new Error(`无效的 URL: ${url}`));
+    }
+
+    const client = url.toLowerCase().startsWith('https:') ? https : http;
+    const maxHtmlBytes = 10 * 1024 * 1024;
+    let receivedBytes = 0;
+    const req = client.get(
+      url,
+      {
+        headers: {
+          'User-Agent': MOBILE_USER_AGENT,
+          Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'zh-CN,zh;q=0.9',
+        },
+        timeout: options.timeout,
+      },
+      (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          res.on('error', (e) => {
+            // 重定向响应流错误不影响主流程，verbose 模式下保留可见性
+            if (options.verbose) {
+              log(options, `重定向响应流错误（已忽略）: ${e.message}`);
+            }
+          });
+          res.resume(); // 消费原响应体，避免缓冲区满阻塞
+          let nextUrl;
+          try {
+            nextUrl = new URL(res.headers.location, url).toString();
+            assertAllowedHttpUrl(nextUrl, '重定向');
+          } catch (e) {
+            return reject(e.message ? new Error(e.message) : new Error(`无效的重定向 URL: ${res.headers.location}`));
+          }
+          return fetchHtmlWithNode(nextUrl, options, redirectCount + 1).then(resolve, reject);
+        }
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          res.resume(); // 消费错误响应体，避免缓冲区满阻塞
+          return reject(new Error(`HTTP ${res.statusCode}`));
+        }
+        res.on('error', reject); // 2xx 响应流错误：协议错误、socket 中断等
+        let data = '';
+        res.setEncoding('utf-8');
+        res.on('data', (chunk) => {
+          receivedBytes += Buffer.byteLength(chunk, 'utf8');
+          if (receivedBytes > maxHtmlBytes) {
+            req.destroy();
+            return reject(new Error(`响应体超过 ${formatBytes(maxHtmlBytes)} 上限`));
+          }
+          data += chunk;
+        });
+        res.on('end', () => resolve(data));
+      }
+    );
+    req.on('error', reject);
+    req.on('timeout', () => {
+      req.destroy();
+      reject(new Error('请求超时'));
+    });
+  });
+}
+
+function parseCurlHeaders(stdout) {
+  // curl -D - 在代理 CONNECT、100 Continue 等场景可能输出多段响应头，取最后一段真实响应头。
+  let offset = 0;
+  let headers = '';
+
+  while (stdout.slice(offset).startsWith('HTTP/')) {
+    const crlf = stdout.indexOf('\r\n\r\n', offset);
+    const lf = stdout.indexOf('\n\n', offset);
+    let sep = -1;
+    if (crlf !== -1 && lf !== -1) sep = Math.min(crlf, lf);
+    else sep = crlf !== -1 ? crlf : lf;
+    if (sep === -1) return { headers: stdout.slice(offset), body: '' };
+
+    const sepLen = stdout.charAt(sep) === '\r' ? 4 : 2;
+    headers = stdout.slice(offset, sep);
+    offset = sep + sepLen;
+
+    if (!stdout.slice(offset).startsWith('HTTP/')) {
+      return { headers, body: stdout.slice(offset) };
+    }
+  }
+
+  return { headers, body: stdout };
+}
+
+function fetchHtmlWithCurl(url, options, redirectCount = 0) {
+  if (redirectCount > 5) {
+    throw new Error('重定向次数过多（>5），疑似配置错误');
+  }
+
+  const curl = findCommand(['curl']);
+  if (!curl) return null;
+  assertAllowedHttpUrl(url, '请求');
+
+  const timeoutSec = String(Math.max(1, Math.round((options.timeout || 30000) / 1000)));
+  const args = [
+    '-s', // 静默
+    '-D', '-', // 将响应头输出到 stdout，便于手动处理重定向
+    '--connect-timeout', timeoutSec,
+    '--max-time', timeoutSec,
+    '-A', MOBILE_USER_AGENT,
+    '-H', 'Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    '-H', 'Accept-Language: zh-CN,zh;q=0.9',
+  ];
+
+  if (options.proxy) {
+    args.push('-x', options.proxy);
+  }
+
+  args.push(url);
+
+  log(options, `执行 curl 获取页面: ${url}`);
+  const result = spawnSync(curl, args, {
+    encoding: 'utf-8',
+    stdio: 'pipe',
+    maxBuffer: 10 * 1024 * 1024,
+    env: createChildEnv(options),
+  });
+
+  if (result.error) {
+    throw new Error(`curl 执行失败: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    const stderr = (result.stderr || '').trim();
+    throw new Error(`curl 请求失败 (exit ${result.status})${stderr ? ': ' + stderr : ''}`);
+  }
+
+  const { headers, body } = parseCurlHeaders(result.stdout);
+  const statusLine = headers.split(/\r?\n/)[0] || '';
+  const statusMatch = statusLine.match(/HTTP\/\d(?:\.\d)?\s+(\d{3})/);
+  const statusCode = statusMatch ? parseInt(statusMatch[1], 10) : 0;
+
+  if (statusCode >= 300 && statusCode < 400) {
+    const locationMatch = headers.match(/^\s*[Ll]ocation:\s*(.+)$/m);
+    if (locationMatch) {
+      const location = locationMatch[1].trim();
+      let nextUrl;
+      try {
+        nextUrl = new URL(location, url).toString();
+        assertAllowedHttpUrl(nextUrl, 'curl 重定向');
+      } catch (e) {
+        throw new Error(e.message || `无效的重定向 URL: ${location}`);
+      }
+      return fetchHtmlWithCurl(nextUrl, options, redirectCount + 1);
+    }
+  }
+
+  if (statusCode < 200 || statusCode >= 300) {
+    throw new Error(`HTTP ${statusCode}`);
+  }
+
+  return body;
+}
+
+function parseApkUrlFromHtml(html) {
+  if (!html) return { apkUrl: null, allUrls: [] };
+  // 优先匹配 imtt 官方 CDN 的 .apk 链接
+  const matches = html.match(/https?:\/\/[^"'<>\s]+\.apk[^"'<>\s]*/gi) || [];
+  const allUrls = [...new Set(matches)].filter((u) => {
+    try {
+      assertAllowedHttpUrl(u, 'APK 下载地址');
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  const official = allUrls.find((u) => u.includes('imtt'));
+  return {
+    apkUrl: official || allUrls[0] || null,
+    allUrls,
+  };
+}
+
+function resolveDownloadRedirects(url, options, redirectCount = 0) {
+  if (redirectCount > 5) {
+    throw new Error('APK 下载重定向次数过多（>5），疑似配置错误');
+  }
+
+  const safeUrl = assertAllowedHttpUrl(url, 'APK 下载地址').toString();
+  const curl = findCommand(['curl']);
+  if (!curl) return safeUrl;
+
+  const timeoutSec = String(Math.max(1, Math.round((options.timeout || 30000) / 1000)));
+  const args = [
+    '-s',
+    '-D', '-',
+    '-o', os.devNull,
+    '--connect-timeout', timeoutSec,
+    '--max-time', timeoutSec,
+    '-A', MOBILE_USER_AGENT,
+    '-H', 'Referer: https://a.app.qq.com/',
+  ];
+  if (options.proxy) {
+    args.push('-x', options.proxy);
+  }
+  args.push(safeUrl);
+
+  const result = spawnSync(curl, args, {
+    encoding: 'utf-8',
+    stdio: 'pipe',
+    maxBuffer: 1024 * 1024,
+    env: createChildEnv(options),
+  });
+
+  if (result.error) {
+    throw new Error(`curl 解析下载重定向失败: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    const stderr = (result.stderr || '').trim();
+    throw new Error(`curl 解析下载重定向失败 (exit ${result.status})${stderr ? ': ' + stderr : ''}`);
+  }
+
+  const { headers } = parseCurlHeaders(result.stdout);
+  const statusLine = headers.split(/\r?\n/)[0] || '';
+  const statusMatch = statusLine.match(/HTTP\/\d(?:\.\d)?\s+(\d{3})/);
+  const statusCode = statusMatch ? parseInt(statusMatch[1], 10) : 0;
+
+  if (statusCode >= 300 && statusCode < 400) {
+    const locationMatch = headers.match(/^\s*[Ll]ocation:\s*(.+)$/m);
+    if (!locationMatch) {
+      throw new Error(`APK 下载地址返回 HTTP ${statusCode} 但缺少 Location`);
+    }
+    const nextUrl = new URL(locationMatch[1].trim(), safeUrl).toString();
+    assertAllowedHttpUrl(nextUrl, 'APK 下载重定向');
+    return resolveDownloadRedirects(nextUrl, options, redirectCount + 1);
+  }
+
+  if (statusCode === 405 || statusCode === 501) {
+    log(options, `服务器不支持 HEAD 预检，使用原始下载地址: ${safeUrl}`);
+    return safeUrl;
+  }
+
+  if (statusCode < 200 || statusCode >= 300) {
+    throw new Error(`APK 下载地址预检失败: HTTP ${statusCode || '未知'}`);
+  }
+
+  return safeUrl;
+}
+
+async function extractApkDownloadUrl(input, options) {
+  const trimmed = input.trim();
+  const isUrl = /^https?:\/\//i.test(trimmed);
+  // 非 URL 输入必须是合法包名，防止路径遍历或特殊字符被当成包名
+  if (!isUrl && !isValidPkgName(trimmed)) {
+    throw new Error(`非法包名: ${input}（应为类似 com.example.app 的 Android 包名）`);
+  }
+
+  const url = normalizeUrl(input);
+  const pkgName = getPkgName(url);
+
+  if (!pkgName) {
+    throw new Error(`无法从输入中解析包名: ${input}`);
+  }
+
+  // a.app.qq.com 的移动端页面会返回带 APK 直链的 HTML
+  const simpleUrl = `https://a.app.qq.com/o/simple.jsp?pkgname=${encodeURIComponent(pkgName)}`;
+  log(options, `目标包名: ${pkgName}`);
+  log(options, `请求应用宝移动页面: ${simpleUrl}`);
+
+  let html = null;
+
+  // 优先使用 curl（天然支持各类代理），失败时自动重试
+  try {
+    html = retrySync(() => fetchHtmlWithCurl(simpleUrl, options), 3);
+  } catch (e) {
+    // curl 存在但执行失败：有代理时直接报错，无代理时回退到 Node.js
+    if (options.proxy) throw e;
+    log(options, `curl 执行失败，回退到 Node.js 内置模块: ${e.message}`);
+  }
+
+  // 兜底：使用 Node.js 内置 https（不支持代理，除非系统已透明转发）
+  if (html === null) {
+    if (options.proxy) {
+      throw new Error(
+        '未检测到 curl，无法通过代理访问。请安装 curl，或移除 --proxy 在无代理网络中使用。'
+      );
+    }
+    html = await retryAsync(() => fetchHtmlWithNode(simpleUrl, options), 3);
+  }
+
+  if (!html) {
+    throw new Error('未能获取应用宝页面内容');
+  }
+
+  const { apkUrl, allUrls } = parseApkUrlFromHtml(html);
+  if (!apkUrl) {
+    throw new Error('未能从页面中解析出 APK 下载链接，可能应用宝页面结构已变更');
+  }
+
+  return {
+    pkgName,
+    detailUrl: url,
+    apkUrl,
+    allUrls,
+  };
+}
+
+async function downloadApk(apkUrl, pkgName, downloadDir, options) {
+  const safeApkUrl = resolveDownloadRedirects(apkUrl, options);
+
+  if (!fs.existsSync(downloadDir)) {
+    fs.mkdirSync(downloadDir, { recursive: true });
+  }
+
+  // 从 URL 的 fsname 参数提取文件名，否则使用包名
+  let fileName = `${pkgName}.apk`;
+  try {
+    const u = new URL(apkUrl);
+    const fsName = u.searchParams.get('fsname');
+    if (fsName) fileName = fsName;
+  } catch {
+    // ignore
+  }
+
+  // 安全：仅保留文件名部分，防止路径遍历（如 fsname=../evil.apk 或 a/b\\c.apk）
+  // 统一使用 POSIX 路径语义处理，再移除控制字符与路径分隔符残留
+  fileName = path.posix.basename(fileName.replace(/\\/g, '/'));
+  fileName = fileName.replace(/[\x00-\x1f]/g, '');
+  if (!fileName || fileName === '.' || fileName === '/') {
+    fileName = `${pkgName}.apk`;
+  }
+
+  const filePath = path.resolve(downloadDir, fileName);
+  log(options, `开始下载 APK 到: ${filePath}`);
+  if (!options.verbose) {
+    console.error(`${c.blue}[download]${c.reset} ${c.bold}${fileName}${c.reset}`);
+  }
+
+  const ua = MOBILE_USER_AGENT;
+  const referer = 'https://a.app.qq.com/';
+
+  const proxyEnv = options.proxy
+    ? createChildEnv(options)
+    : options.ignoreProxyEnv
+      ? createChildEnv(options)
+      : process.env;
+  const stdio = options.verbose ? 'inherit' : 'pipe';
+  const timeoutSec = String(Math.max(1, Math.round((options.timeout || 30000) / 1000)));
+
+  function runTool(exe, args) {
+    // 日志中脱敏代理凭据
+    const logArgs = args.map((a) => (a === options.proxy ? maskUrl(a) : a));
+    log(options, `执行下载命令: ${exe} ${logArgs.join(' ')}`);
+    const result = spawnSync(exe, args, { env: proxyEnv, stdio, maxBuffer: 100 * 1024 * 1024 });
+    if (result.error) throw result.error;
+    if (result.status !== 0) {
+      const stderr = (result.stderr || '').trim();
+      throw new Error(`下载工具 ${exe} 退出码 ${result.status}${stderr ? ': ' + stderr : ''}`);
+    }
+  }
+
+  // 下载阶段优先使用 curl，避免外部工具自动跟随未校验的跨域重定向。
+  const curl = findCommand(['curl']);
+  if (curl) {
+    const curlArgs = [
+      '--fail',
+      '--connect-timeout', timeoutSec, // 连接建立超时
+      '--speed-time', timeoutSec,       // 若平均速度低于 speed-limit 持续该时长则中断
+      '--speed-limit', '1024',          // 1KB/s，检测是否基本断流
+      '-C', '-',                        // 断点续传
+      '-o', filePath,
+      '-H', `User-Agent: ${ua}`,
+      '-H', `Referer: ${referer}`,
+    ];
+    if (options.proxy) {
+      curlArgs.push('--proxy', options.proxy);
+    }
+    curlArgs.push(safeApkUrl);
+    runTool(curl, curlArgs);
+  } else {
+    const aria2c = findCommand(['aria2c']);
+    if (aria2c && isAria2cProxySupported(options.proxy)) {
+    const aria2cArgs = [
+      '-x', '16',
+      '-s', '16',
+      '--continue=true', // 断点续传
+      '--allow-overwrite=true',
+      '--auto-file-renaming=false',
+      '--timeout', timeoutSec,
+      '--connect-timeout', timeoutSec,
+      '--lowest-speed-limit=1024',
+      '-o', fileName,
+      '--dir', downloadDir,
+      '--header', `User-Agent: ${ua}`,
+      '--header', `Referer: ${referer}`,
+    ];
+    if (options.proxy) {
+      // aria2c 推荐显式指定 --all-proxy，仅依赖环境变量可能不一致
+      aria2cArgs.push('--all-proxy', options.proxy);
+    }
+    aria2cArgs.push(safeApkUrl);
+    runTool(aria2c, aria2cArgs);
+    } else {
+      const wget = findCommand(['wget']);
+      if (wget) {
+        if (options.proxy && /^socks5h?:\/\//i.test(options.proxy)) {
+          throw new Error('wget 对 socks5/socks5h 代理支持不稳定，请安装 curl 或使用 http:// 代理');
+        }
+        runTool(wget, [
+          '-T', timeoutSec,
+          '-c', // 断点续传
+          '--max-redirect=0',
+          '--no-check-certificate',
+          '-O', filePath,
+          `--user-agent=${ua}`,
+          `--referer=${referer}`,
+          safeApkUrl,
+        ]);
+      } else {
+        throw new Error('未找到可用的下载工具（aria2c / curl / wget），无法下载 APK');
+      }
+    }
+  }
+
+  // 完整性校验：文件必须存在且非空
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`下载完成后未找到文件: ${filePath}`);
+  }
+  const stats = fs.statSync(filePath);
+  if (stats.size === 0) {
+    throw new Error(`下载完成但文件大小为 0: ${filePath}`);
+  }
+
+  // 完整性校验 2：APK 本质是 ZIP，读取前 4 字节魔数 PK\x03\x04 (504b0304)
+  let fd;
+  try {
+    const magic = Buffer.alloc(4);
+    fd = fs.openSync(filePath, 'r');
+    fs.readSync(fd, magic, 0, 4, 0);
+    if (magic.toString('hex') !== '504b0304') {
+      try { fs.unlinkSync(filePath); } catch {}
+      throw new Error(`下载的文件不是合法 APK/ZIP (魔数 ${magic.toString('hex')} 不匹配 504b0304)，已自动清理`);
+    }
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+
+  if (!options.verbose) {
+    console.error(`${c.green}[ok]${c.reset} ${c.bold}${fileName}${c.reset} ${c.dim}(${formatBytes(stats.size)})${c.reset}`);
+  }
+
+  return filePath;
+}
+
+async function main() {
+  const { pkgNameOrUrl, options } = parseArgs(process.argv);
+  const result = await extractApkDownloadUrl(pkgNameOrUrl, options);
+
+  if (options.downloadDir) {
+    const filePath = await retryAsync(
+      () => downloadApk(result.apkUrl, result.pkgName, options.downloadDir, options),
+      2,
+      3000
+    );
+    result.downloadedFile = filePath;
+  }
+
+  console.log(JSON.stringify(result, null, 2));
+}
+
+function registerGlobalErrorHandlers() {
+  process.on('unhandledRejection', (err) => {
+    console.error(`${c.red}[error] 未捕获的异步异常:${c.reset} ${err && err.message ? err.message : err}`);
+    process.exit(1);
+  });
+  process.on('uncaughtException', (err) => {
+    console.error(`${c.red}[error] 未捕获的同步异常:${c.reset} ${err && err.message ? err.message : err}`);
+    process.exit(1);
+  });
+}
+
+if (require.main === module) {
+  registerGlobalErrorHandlers();
+  main().catch((err) => {
+    console.error(`${c.red}[error]${c.reset} ${err.message}`);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  assertAllowedHttpUrl,
+  assertAllowedHostname,
+  createChildEnv,
+  extractApkDownloadUrl,
+  fetchHtmlWithCurl,
+  fetchHtmlWithNode,
+  formatBytes,
+  getPkgName,
+  isAria2cProxySupported,
+  isValidPkgName,
+  maskUrl,
+  normalizeUrl,
+  parseApkUrlFromHtml,
+  parseArgs,
+  parseCurlHeaders,
+  resolveDownloadRedirects,
+  validateProxy,
+};
