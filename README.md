@@ -154,11 +154,12 @@ node index.js com.example.app --proxy=socks5h://127.0.0.1:7890
 ## 安全设计
 
 - 所有外部命令均通过 `spawnSync` 参数数组调用，无 shell 拼接
-- 输入校验：包名白名单、URL 域名校验、非法代理拒绝、未知选项报错
+- 输入校验：包名白名单、URL 域名校验、非法代理拒绝、未知选项报错、多余参数拦截
 - SSRF 防护：页面提取和下载预检都限制目标域名为 `*.qq.com`
-- 代理凭据脱敏：verbose 日志和错误信息中的代理 URL 自动隐藏凭据
-- 下载文件完整性：校验存在、非空、ZIP/APK 头部魔数
-- 全局兜底：`unhandledRejection` / `uncaughtException` 统一捕获并退出
+- 路径安全：下载文件名经过 `path.posix.basename` 处理并移除控制字符，防止路径遍历
+- 代理安全：代理 URL 校验协议、主机、端口；verbose 日志和错误信息中自动隐藏凭据；支持 `--no-proxy` 临时忽略环境代理
+- 下载完整性：下载前做 APK 直链重定向预检，下载完成后校验文件存在、非空且 ZIP/APK 头部魔数正确
+- 全局兜底：`unhandledRejection` / `uncaughtException` 统一捕获并友好退出
 
 ---
 
@@ -168,18 +169,6 @@ node index.js com.example.app --proxy=socks5h://127.0.0.1:7890
 2. 请求应用宝移动端页面 `https://a.app.qq.com/o/simple.jsp?pkgname=...`
 3. 从 HTML 中匹配所有 `.apk` 链接，优先返回 `imtt` 官方 CDN 链接
 4. 若指定 `--download-dir`，则按 `curl` -> `aria2c` -> `wget` 优先级选择工具下载 APK，并校验文件存在、非空且头部魔数符合 ZIP/APK 标准
-
----
-
-## 安全说明
-
-- 所有外部命令均通过 `spawnSync` 参数数组调用，无 shell 拼接
-- 下载文件名经过 `path.posix.basename` 处理并移除控制字符，防止路径遍历
-- 包名和 URL 均经过校验，拒绝空输入、路径遍历、非法包名、非法代理、未知选项等异常输入
-- 页面提取和下载预检均限制目标域名为 `*.qq.com`
-- 代理 URL 校验协议、主机、端口，日志中对凭据脱敏；支持 `--no-proxy` 临时忽略环境代理
-- 下载前做 APK 直链重定向预检，下载完成后校验 ZIP/APK 头部魔数
-- 全局 `unhandledRejection` / `uncaughtException` 兜底
 
 ---
 
