@@ -73,6 +73,7 @@ node index.js --interactive
 | `--no-proxy` | 忽略环境变量中的代理设置 |
 | `--download-dir=目录` | 提取链接后自动下载 APK 到指定目录 |
 | `--timeout=毫秒` | 网络超时时间，默认 `30000`，必须为正整数毫秒。fetch 阶段为请求总时长；下载阶段为连接/断流检测时长 |
+| `--insecure` | 下载时跳过 HTTPS 证书校验（仅限测试环境） |
 | `--verbose`, `-v` | 显示详细调试日志 |
 | `--interactive`, `-i` | 进入交互式向导 |
 | `--version`, `-V` | 显示版本号 |
@@ -212,7 +213,8 @@ node index.js com.example.app --proxy=socks5h://127.0.0.1:7890
 - SSRF 防护：页面提取、搜索请求和下载预检都限制目标域名为 `*.qq.com`，搜索接口额外收敛到 `sj.qq.com`
 - 终端安全：回显的应用名、开发者等网络数据均过滤 ANSI 转义序列与控制字符，防止终端注入
 - 路径安全：下载文件名经过 `path.posix.basename` 处理并移除控制字符，防止路径遍历
-- 代理安全：代理 URL 校验协议、主机、端口；verbose 日志和错误信息中自动隐藏凭据；支持 `--no-proxy` 临时忽略环境代理
+- 代理安全：代理 URL 校验协议、主机、端口；verbose 日志和错误信息中自动隐藏凭据；子进程参数与环境变量中剥离代理账号密码，避免凭据泄露
+- 下载安全：curl / aria2c / wget 默认严格校验 HTTPS 证书；如需测试环境可显式使用 `--insecure`
 - 下载完整性：下载前做 APK 直链重定向预检，下载完成后校验文件存在、非空且 ZIP/APK 头部魔数正确
 - 全局兜底：`unhandledRejection` / `uncaughtException` 统一捕获并友好退出
 
