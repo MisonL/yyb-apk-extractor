@@ -63,12 +63,6 @@ const SEARCH_URL_TEMPLATE = 'https://sj.qq.com/search?q=';
 const MAX_KEYWORD_LEN = 100;
 const SEARCH_RESULT_LIMIT = 20;
 const ALLOWED_SEARCH_HOSTNAMES = ['sj.qq.com'];
-const ALLOWED_DOWNLOAD_HOSTNAME_PATTERNS = [
-  /^[a-z0-9-]+\.dd\.qq\.com$/i,
-  /^[a-z0-9-]+\.apk\.myapp\.com$/i,
-  /^imtt\d*\.dd\.qq\.com$/i,
-  /^imtt\d*\.qq\.com$/i,
-];
 
 // 终端颜色支持：非 TTY 或设置 NO_COLOR/--no-color 时禁用，保证管道输出干净
 const noColorFlag = process.argv.includes('--no-color');
@@ -243,30 +237,33 @@ function parseArgs(argv) {
     throw new Error(`关键词过长 (>${MAX_INPUT_LEN} 字符)`);
   }
 
-  if (options.downloadDir !== '' && !options.downloadDir.trim()) {
-    throw new Error('--download-dir 不能为空');
-  }
-
-  const downloadDirSegments = options.downloadDir.split(/[\\/]+/).filter(Boolean);
-  if (downloadDirSegments.includes('..')) {
-    throw new Error('--download-dir 不能包含路径遍历 ..');
-  }
-
   // 若显式传入空值 --download-dir=，语义不明确，要求用 . 表示当前目录
   if (args.some((a) => a === '--download-dir=')) {
     throw new Error('--download-dir= 值不能为空，如需当前目录请使用 --download-dir=.');
   }
 
-  const resolvedDownloadDir = path.resolve(options.downloadDir);
-  if (options.downloadDir && resolvedDownloadDir === path.parse(resolvedDownloadDir).root) {
-    throw new Error('--download-dir 不能为根目录');
-  }
+  validateDownloadDir(options.downloadDir, '--download-dir');
 
   if (!options.proxy && !options.ignoreProxyEnv && proxyFromEnv) {
     options.proxy = validateProxy(proxyFromEnv);
   }
 
   return { mode, pkgNameOrUrl, keyword, options };
+}
+
+function validateDownloadDir(dir, label = '下载目录') {
+  if (dir === '') return;
+  if (!dir.trim()) {
+    throw new Error(`${label} 不能为空`);
+  }
+  const segments = dir.split(/[\\/]+/).filter(Boolean);
+  if (segments.includes('..')) {
+    throw new Error(`${label} 不能包含路径遍历 ..`);
+  }
+  const resolved = path.resolve(dir);
+  if (resolved === path.parse(resolved).root) {
+    throw new Error(`${label} 不能为根目录`);
+  }
 }
 
 function normalizeUrl(input) {
@@ -376,12 +373,12 @@ function maskUrl(value) {
   }
 }
 
-// 终端输出安全净化：过滤来自网络的字符串中的 ANSI 转义序列与控制字符
+// 终端输出安全净化：过滤来自网络的字符串中的 ANSI 转义序列、C1 控制字符与换行/回车
 function sanitizeTerminalOutput(str) {
   if (typeof str !== 'string') return '';
   return str
     .replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '')
-    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
+    .replace(/[\x00-\x1f\x7f\u0080-\u009f]/g, '');
 }
 
 function log(options, ...args) {
@@ -994,14 +991,22 @@ async function downloadApk(apkUrl, pkgName, downloadDir, options) {
 function createReadline() {
   const readline = require('readline');
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  let closed = false;
+  rl.on('close', () => {
+    closed = true;
+  });
   const ask = (prompt) =>
-    new Promise((resolve) =>
+    new Promise((resolve) => {
+      if (closed) {
+        resolve(null);
+        return;
+      }
       rl.question(prompt, (ans) => {
         // 限制单行输入长度，防止 DoS
         resolve(typeof ans === 'string' ? ans.slice(0, 100) : '');
-      })
-    );
-  return { rl, ask };
+      });
+    });
+  return { rl, ask, get closed() { return closed; } };
 }
 
 async function runInteractive(options) {
@@ -1009,8 +1014,8 @@ async function runInteractive(options) {
     throw new Error('交互模式需要在 TTY 终端中运行');
   }
 
-  const { rl, ask } = createReadline();
-  const state = { results: [], selected: null, busy: false };
+  const { rl, ask, closed } = createReadline();
+  const state = { results: [], selected: null, busy: false, exiting: false };
 
   const printResults = () => {
     if (!state.results.length) {
@@ -1044,8 +1049,11 @@ async function runInteractive(options) {
     console.error(`${c.bold}${c.cyan}yyb-apk-extractor 交互模式${c.reset} ${c.dim}v${VERSION}${c.reset}\n`);
     printHelp();
 
-    while (true) {
+    while (!state.exiting) {
       const raw = await ask('yyb> ');
+      if (raw === null || closed()) {
+        break;
+      }
       const line = typeof raw === 'string' ? raw.trim() : '';
       if (!line) continue;
       const [cmd, ...rest] = line.split(/\s+/);
@@ -1056,7 +1064,10 @@ async function runInteractive(options) {
           console.error('当前有任务执行中，请等待完成');
           continue;
         }
-        if (cmd === 'exit' || cmd === 'quit' || cmd === 'q') break;
+        if (cmd === 'exit' || cmd === 'quit' || cmd === 'q') {
+          state.exiting = true;
+          break;
+        }
         if (cmd === 'help' || cmd === 'h' || cmd === '?') {
           printHelp();
         } else if (cmd === 'search' || cmd === 's') {
@@ -1090,9 +1101,12 @@ async function runInteractive(options) {
           }
           let dir = options.downloadDir;
           if (!dir) {
-            const answer = (await ask('下载目录 (默认当前目录): ')).trim();
+            const answerRaw = await ask('下载目录 (默认当前目录): ');
+            if (answerRaw === null || closed()) break;
+            const answer = answerRaw.trim();
             dir = answer || '.';
           }
+          validateDownloadDir(dir, '下载目录');
           state.busy = true;
           const result = await extractApkDownloadUrl(state.selected.pkgName, options);
           const filePath = await downloadApk(result.apkUrl, result.pkgName, dir, options);
