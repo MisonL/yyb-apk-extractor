@@ -3,7 +3,11 @@ const path = require('path');
 
 // 加载被测模块（不触发 CLI 主流程）
 const {
+  buildAria2cProxyConfigText,
+  buildCurlProxyConfigInput,
+  createChildEnv,
   isValidPkgName,
+  hasProxyCredentials,
   validateSearchKeyword,
   sanitizeTerminalOutput,
   safeTencentUrl,
@@ -235,6 +239,27 @@ test('splitProxyAuth 无凭据代理返回空凭据', () => {
   assert.strictEqual(result.url, 'http://127.0.0.1:7890/');
   assert.strictEqual(result.username, '');
   assert.strictEqual(result.password, '');
+});
+test('代理凭据不进入子进程环境变量', () => {
+  const options = {
+    proxy: 'http://user:secret@127.0.0.1:7890',
+    ignoreProxyEnv: false,
+  };
+  const env = createChildEnv(options);
+  assert.strictEqual(env.HTTPS_PROXY, 'http://127.0.0.1:7890/');
+  assert.strictEqual(env.HTTP_PROXY, 'http://127.0.0.1:7890/');
+  assert.ok(!env.HTTPS_PROXY.includes('secret'));
+  assert.ok(!env.HTTP_PROXY.includes('secret'));
+  assert.ok(!env.ALL_PROXY.includes('secret'));
+});
+test('认证代理通过工具配置输入承载，不拼入无凭据 URL', () => {
+  const proxy = 'http://user:secret@127.0.0.1:7890';
+  const { url } = splitProxyAuth(proxy);
+  assert.strictEqual(hasProxyCredentials(proxy), true);
+  assert.strictEqual(url, 'http://127.0.0.1:7890/');
+  assert.ok(buildCurlProxyConfigInput(proxy).includes('secret'));
+  assert.ok(buildAria2cProxyConfigText(proxy).includes('secret'));
+  assert.ok(!url.includes('secret'));
 });
 
 console.log('\n=== readline 封装 ===');

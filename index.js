@@ -353,6 +353,39 @@ function splitProxyAuth(proxyUrl) {
   }
 }
 
+function hasProxyCredentials(proxyUrl) {
+  const { username, password } = splitProxyAuth(proxyUrl);
+  return Boolean(username || password);
+}
+
+function buildCurlProxyConfigInput(proxyUrl) {
+  if (!proxyUrl) return '';
+  return `proxy = ${JSON.stringify(proxyUrl)}\n`;
+}
+
+function buildAria2cProxyConfigText(proxyUrl) {
+  if (!proxyUrl) return '';
+  return `all-proxy=${proxyUrl}\n`;
+}
+
+function writeTempConfigFile(prefix, content) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  fs.chmodSync(dir, 0o700);
+  const filePath = path.join(dir, 'config');
+  fs.writeFileSync(filePath, content, { encoding: 'utf8', mode: 0o600 });
+  fs.chmodSync(filePath, 0o600);
+  return {
+    filePath,
+    cleanup() {
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch {
+        // ignore
+      }
+    },
+  };
+}
+
 function createChildEnv(options) {
   if (!options.ignoreProxyEnv && !options.proxy) {
     return process.env;
@@ -617,10 +650,11 @@ function fetchHtmlWithCurl(url, options, redirectCount = 0) {
   ];
 
   if (options.proxy) {
-    const { url: proxyUrl, username, password } = splitProxyAuth(options.proxy);
-    args.push('-x', proxyUrl);
-    if (username) {
-      args.push('--proxy-user', `${username}:${password}`);
+    const { url: proxyUrl } = splitProxyAuth(options.proxy);
+    if (hasProxyCredentials(options.proxy)) {
+      args.push('-K', '-');
+    } else {
+      args.push('-x', proxyUrl);
     }
   }
 
@@ -631,6 +665,7 @@ function fetchHtmlWithCurl(url, options, redirectCount = 0) {
     encoding: 'utf-8',
     stdio: 'pipe',
     maxBuffer: 10 * 1024 * 1024,
+    input: options.proxy && hasProxyCredentials(options.proxy) ? buildCurlProxyConfigInput(options.proxy) : undefined,
     env: createChildEnv(options),
   });
 
@@ -759,7 +794,12 @@ function resolveDownloadRedirects(url, options, redirectCount = 0) {
     '-H', 'Referer: https://a.app.qq.com/',
   ];
   if (options.proxy) {
-    args.push('-x', options.proxy);
+    const { url: proxyUrl } = splitProxyAuth(options.proxy);
+    if (hasProxyCredentials(options.proxy)) {
+      args.push('-K', '-');
+    } else {
+      args.push('-x', proxyUrl);
+    }
   }
   args.push(safeUrl);
 
@@ -767,6 +807,7 @@ function resolveDownloadRedirects(url, options, redirectCount = 0) {
     encoding: 'utf-8',
     stdio: 'pipe',
     maxBuffer: 1024 * 1024,
+    input: options.proxy && hasProxyCredentials(options.proxy) ? buildCurlProxyConfigInput(options.proxy) : undefined,
     env: createChildEnv(options),
   });
 
@@ -936,6 +977,10 @@ async function downloadApk(apkUrl, pkgName, downloadDir, options) {
   const timeoutSec = String(Math.max(1, Math.round((options.timeout || 30000) / 1000)));
 
   function runTool(exe, args) {
+    return runToolWithInput(exe, args, '');
+  }
+
+  function runToolWithInput(exe, args, input) {
     // 日志中脱敏代理 URL 及代理凭据参数（支持 --flag value 与 --flag=value 两种形式）
     const proxyAuthFlags = ['--proxy-user', '--proxy-password', '--all-proxy-user', '--all-proxy-passwd'];
     const logArgs = [];
@@ -954,7 +999,15 @@ async function downloadApk(apkUrl, pkgName, downloadDir, options) {
       }
     }
     log(options, `执行下载命令: ${exe} ${logArgs.join(' ')}`);
-    const result = spawnSync(exe, args, { env: proxyEnv, stdio, maxBuffer: 100 * 1024 * 1024 });
+    const spawnOptions = {
+      env: proxyEnv,
+      stdio: input ? 'pipe' : stdio,
+      maxBuffer: 100 * 1024 * 1024,
+    };
+    if (input) {
+      spawnOptions.input = input;
+    }
+    const result = spawnSync(exe, args, spawnOptions);
     if (result.error) throw result.error;
     if (result.status !== 0) {
       const stderr = (result.stderr || '').trim();
@@ -975,51 +1028,66 @@ async function downloadApk(apkUrl, pkgName, downloadDir, options) {
       '-H', `User-Agent: ${ua}`,
       '-H', `Referer: ${referer}`,
     ];
+    let curlInput = '';
     if (options.proxy) {
-      const { url: proxyUrl, username, password } = splitProxyAuth(options.proxy);
-      curlArgs.push('--proxy', proxyUrl);
-      if (username) {
-        curlArgs.push('--proxy-user', `${username}:${password}`);
+      const { url: proxyUrl } = splitProxyAuth(options.proxy);
+      if (hasProxyCredentials(options.proxy)) {
+        curlArgs.push('-K', '-');
+        curlInput = buildCurlProxyConfigInput(options.proxy);
+      } else {
+        curlArgs.push('--proxy', proxyUrl);
       }
     }
     if (options.insecure) {
       curlArgs.push('--insecure');
     }
     curlArgs.push(safeApkUrl);
-    runTool(curl, curlArgs);
+    runToolWithInput(curl, curlArgs, curlInput);
   } else {
     const aria2c = findCommand(['aria2c']);
     if (aria2c && isAria2cProxySupported(options.proxy)) {
-    const aria2cArgs = [
-      '-x', '16',
-      '-s', '16',
-      '--continue=true', // 断点续传
-      '--allow-overwrite=true',
-      '--auto-file-renaming=false',
-      '--timeout', timeoutSec,
-      '--connect-timeout', timeoutSec,
-      '--lowest-speed-limit=1024',
-      '-o', fileName,
-      '--dir', downloadDir,
-      '--header', `User-Agent: ${ua}`,
-      '--header', `Referer: ${referer}`,
-    ];
-    if (options.proxy) {
-      // aria2c 推荐显式指定 --all-proxy，仅依赖环境变量可能不一致
-      const { url: proxyUrl, username, password } = splitProxyAuth(options.proxy);
-      aria2cArgs.push('--all-proxy', proxyUrl);
-      if (username) {
-        aria2cArgs.push('--all-proxy-user', username, '--all-proxy-passwd', password);
+      const aria2cArgs = [
+        '-x', '16',
+        '-s', '16',
+        '--continue=true', // 断点续传
+        '--allow-overwrite=true',
+        '--auto-file-renaming=false',
+        '--timeout', timeoutSec,
+        '--connect-timeout', timeoutSec,
+        '--lowest-speed-limit=1024',
+        '-o', fileName,
+        '--dir', downloadDir,
+        '--header', `User-Agent: ${ua}`,
+        '--header', `Referer: ${referer}`,
+      ];
+      let aria2cConfig = null;
+      if (options.proxy) {
+        const { url: proxyUrl } = splitProxyAuth(options.proxy);
+        if (hasProxyCredentials(options.proxy)) {
+          aria2cConfig = writeTempConfigFile(
+            'yyb-apk-extractor-aria2c-',
+            buildAria2cProxyConfigText(options.proxy)
+          );
+          aria2cArgs.push('--conf-path', aria2cConfig.filePath);
+        } else {
+          aria2cArgs.push('--all-proxy', proxyUrl);
+        }
       }
-    }
-    if (options.insecure) {
-      aria2cArgs.push('--check-certificate=false');
-    }
-    aria2cArgs.push(safeApkUrl);
-    runTool(aria2c, aria2cArgs);
+      if (options.insecure) {
+        aria2cArgs.push('--check-certificate=false');
+      }
+      aria2cArgs.push(safeApkUrl);
+      try {
+        runToolWithInput(aria2c, aria2cArgs, '');
+      } finally {
+        if (aria2cConfig) aria2cConfig.cleanup();
+      }
     } else {
       const wget = findCommand(['wget']);
       if (wget) {
+        if (options.proxy && hasProxyCredentials(options.proxy)) {
+          throw new Error('带认证的代理需要 curl 或 aria2c；wget 不接受代理密码出现在命令行');
+        }
         if (options.proxy && /^socks5h?:\/\//i.test(options.proxy)) {
           throw new Error('wget 对 socks5/socks5h 代理支持不稳定，请安装 curl 或使用 http:// 代理');
         }
@@ -1031,12 +1099,6 @@ async function downloadApk(apkUrl, pkgName, downloadDir, options) {
           `--user-agent=${ua}`,
           `--referer=${referer}`,
         ];
-        if (options.proxy) {
-          const { username, password } = splitProxyAuth(options.proxy);
-          if (username) {
-            wgetArgs.push(`--proxy-user=${username}`, `--proxy-password=${password}`);
-          }
-        }
         if (options.insecure) {
           wgetArgs.push('--no-check-certificate');
         }
@@ -1346,12 +1408,15 @@ module.exports = {
   assertAllowedHttpUrl,
   assertAllowedHostname,
   createChildEnv,
+  buildAria2cProxyConfigText,
+  buildCurlProxyConfigInput,
   createReadline,
   extractApkDownloadUrl,
   fetchHtmlWithCurl,
   fetchHtmlWithNode,
   formatBytes,
   getPkgName,
+  hasProxyCredentials,
   isAria2cProxySupported,
   isValidPkgName,
   maskUrl,
