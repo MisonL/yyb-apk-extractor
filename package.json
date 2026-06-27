@@ -8,11 +8,12 @@
   },
   "files": [
     "index.js",
+    "test",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --check index.js",
+    "test": "node --check index.js && node test/index.test.js",
     "start": "node index.js"
   },
   "keywords": [

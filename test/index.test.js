@@ -1,0 +1,176 @@
+const assert = require('assert');
+const path = require('path');
+
+// 加载被测模块（不触发 CLI 主流程）
+const {
+  isValidPkgName,
+  validateSearchKeyword,
+  sanitizeTerminalOutput,
+  safeTencentUrl,
+  validateDownloadDir,
+  parseSearchResultsFromHtml,
+} = require('../index.js');
+
+function test(name, fn) {
+  try {
+    fn();
+    console.log(`  ok: ${name}`);
+  } catch (e) {
+    console.error(`  FAIL: ${name}`);
+    console.error(`    ${e.message}`);
+    process.exitCode = 1;
+  }
+}
+
+console.log('\n=== 包名校验 ===');
+test('合法包名通过', () => {
+  assert.strictEqual(isValidPkgName('com.example.app'), true);
+  assert.strictEqual(isValidPkgName('a.b'), true);
+});
+test('非法包名拒绝', () => {
+  assert.strictEqual(isValidPkgName('example'), false); // 仅一段
+  assert.strictEqual(isValidPkgName('1com.example.app'), false); // 数字开头
+  assert.strictEqual(isValidPkgName('com.example.app!'), false); // 特殊字符
+  assert.strictEqual(isValidPkgName(''), false);
+});
+
+console.log('\n=== 搜索关键词校验 ===');
+test('中英文关键词通过', () => {
+  assert.strictEqual(validateSearchKeyword('微信'), '微信');
+  assert.strictEqual(validateSearchKeyword('  WeChat  '), 'WeChat');
+  assert.strictEqual(validateSearchKeyword('AI-chat_2.0'), 'AI-chat_2.0');
+});
+test('中文标点关键词通过', () => {
+  assert.strictEqual(validateSearchKeyword('《微信》'), '《微信》');
+  assert.strictEqual(validateSearchKeyword('微信，社交'), '微信，社交');
+});
+test('空关键词拒绝', () => {
+  assert.throws(() => validateSearchKeyword(''), /不能为空/);
+  assert.throws(() => validateSearchKeyword('   '), /不能为空/);
+});
+test('超长关键词拒绝', () => {
+  const long = 'a'.repeat(101);
+  assert.throws(() => validateSearchKeyword(long), /过长/);
+});
+test('危险字符拒绝', () => {
+  assert.throws(() => validateSearchKeyword('微信;rm -rf /'), /非法字符/);
+  assert.throws(() => validateSearchKeyword('微信&url=http://evil.com'), /非法字符/);
+});
+
+console.log('\n=== 终端输出净化 ===');
+test('ANSI 转义序列被过滤', () => {
+  assert.strictEqual(sanitizeTerminalOutput('\x1b[31m微信\x1b[0m'), '微信');
+});
+test('控制字符被过滤', () => {
+  assert.strictEqual(sanitizeTerminalOutput('微\x00信\x1f'), '微信');
+});
+test('C1 控制字符被过滤', () => {
+  assert.strictEqual(sanitizeTerminalOutput('微\u009d信\u009c'), '微信');
+});
+test('回车换行被过滤', () => {
+  assert.strictEqual(sanitizeTerminalOutput('微\r\n信'), '微信');
+});
+test('正常中文保留', () => {
+  assert.strictEqual(sanitizeTerminalOutput('深圳市腾讯计算机系统有限公司'), '深圳市腾讯计算机系统有限公司');
+});
+
+console.log('\n=== 腾讯 URL 安全校验 ===');
+test('官方 CDN URL 通过', () => {
+  assert.strictEqual(
+    safeTencentUrl('http://imtt2.dd.qq.com/sjy.00009/sjy.00004/16891/apk/xxx.apk'),
+    'http://imtt2.dd.qq.com/sjy.00009/sjy.00004/16891/apk/xxx.apk'
+  );
+});
+test('图标 URL 通过', () => {
+  assert.strictEqual(
+    safeTencentUrl('http://pp.myapp.com/ma_icon/0/icon_10910_1781183032/256'),
+    'http://pp.myapp.com/ma_icon/0/icon_10910_1781183032/256'
+  );
+});
+test('非腾讯域名拒绝', () => {
+  assert.strictEqual(safeTencentUrl('http://evil.com/xxx.apk'), '');
+});
+test('非 http/https 协议拒绝', () => {
+  assert.strictEqual(safeTencentUrl('ftp://imtt.dd.qq.com/xxx.apk'), '');
+});
+test('空值处理', () => {
+  assert.strictEqual(safeTencentUrl(''), '');
+  assert.strictEqual(safeTencentUrl(null), '');
+});
+
+console.log('\n=== 下载目录校验 ===');
+test('合法目录通过', () => {
+  validateDownloadDir('./downloads');
+  validateDownloadDir('/tmp/yyb');
+});
+test('空目录通过', () => {
+  validateDownloadDir('');
+});
+test('路径遍历拒绝', () => {
+  assert.throws(() => validateDownloadDir('../../../etc'), /路径遍历/);
+});
+test('根目录拒绝', () => {
+  assert.throws(() => validateDownloadDir('/'), /根目录/);
+});
+
+console.log('\n=== 搜索结果解析 ===');
+test('从 __NEXT_DATA__ 解析应用列表', () => {
+  const html = `<!DOCTYPE html><html><head></head><body>
+    <script id="__NEXT_DATA__" type="application/json">
+    {
+      "props": {
+        "pageProps": {
+          "dynamicCardResponse": {
+            "ret": 0,
+            "msg": "success",
+            "data": {
+              "components": [
+                {
+                  "data": {
+                    "name": "SearchList",
+                    "itemData": [
+                      {
+                        "pkg_name": "com.tencent.mm",
+                        "app_id": "10910",
+                        "name": "微信",
+                        "icon": "http://pp.myapp.com/icon.png",
+                        "download_url": "http://imtt2.dd.qq.com/xxx.apk",
+                        "version_name": "8.0.74",
+                        "developer": "腾讯",
+                        "apk_size": "261152116",
+                        "average_rating": "4.30",
+                        "editor_intro": "微信，是一个生活方式"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+    </script>
+  </body></html>`;
+  const results = parseSearchResultsFromHtml(html);
+  assert.strictEqual(results.length, 1);
+  assert.strictEqual(results[0].pkgName, 'com.tencent.mm');
+  assert.strictEqual(results[0].name, '微信');
+  assert.strictEqual(results[0].icon, 'http://pp.myapp.com/icon.png');
+  assert.strictEqual(results[0].rawDownloadUrl, 'http://imtt2.dd.qq.com/xxx.apk');
+});
+test('非法包名被过滤', () => {
+  const html = `<script id="__NEXT_DATA__" type="application/json">
+    {"props":{"pageProps":{"dynamicCardResponse":{"ret":0,"data":{"components":[{"data":{"itemData":[{"pkg_name":"not valid","app_id":"1","name":"x"}]}}]}}}}}
+  </script>`;
+  const results = parseSearchResultsFromHtml(html);
+  assert.strictEqual(results.length, 0);
+});
+test('接口返回异常抛出错误', () => {
+  const html = `<script id="__NEXT_DATA__" type="application/json">
+    {"props":{"pageProps":{"dynamicCardResponse":{"ret":-1,"msg":"fail"}}}}
+  </script>`;
+  assert.throws(() => parseSearchResultsFromHtml(html), /接口返回异常/);
+});
+
+console.log('\n测试完成。');
