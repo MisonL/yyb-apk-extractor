@@ -125,7 +125,7 @@ function showHelp() {
     `  ${c.yellow}node index.js${c.reset} ${c.green}https://sj.qq.com/appdetail/com.example.app${c.reset}`,
     '',
     `  ${c.dim}# 搜索应用${c.reset}`,
-    `  ${c.yellow}node index.js search${c.reset} ${c.green}com.example.app${c.reset}`,
+    `  ${c.yellow}node index.js search${c.reset} ${c.green}微信${c.reset}`,
     '',
     `  ${c.dim}# 进入交互模式${c.reset}`,
     `  ${c.yellow}node index.js --interactive${c.reset}`,
@@ -1006,7 +1006,7 @@ function createReadline() {
         resolve(typeof ans === 'string' ? ans.slice(0, 100) : '');
       });
     });
-  return { rl, ask, get closed() { return closed; } };
+  return { rl, ask, isClosed: () => closed };
 }
 
 async function runInteractive(options) {
@@ -1014,7 +1014,7 @@ async function runInteractive(options) {
     throw new Error('交互模式需要在 TTY 终端中运行');
   }
 
-  const { rl, ask, closed } = createReadline();
+  const { rl, ask, isClosed } = createReadline();
   const state = { results: [], selected: null, busy: false, exiting: false };
 
   const printResults = () => {
@@ -1051,7 +1051,7 @@ async function runInteractive(options) {
 
     while (!state.exiting) {
       const raw = await ask('yyb> ');
-      if (raw === null || closed()) {
+      if (raw === null || isClosed()) {
         break;
       }
       const line = typeof raw === 'string' ? raw.trim() : '';
@@ -1102,7 +1102,7 @@ async function runInteractive(options) {
           let dir = options.downloadDir;
           if (!dir) {
             const answerRaw = await ask('下载目录 (默认当前目录): ');
-            if (answerRaw === null || closed()) break;
+            if (answerRaw === null || isClosed()) break;
             const answer = answerRaw.trim();
             dir = answer || '.';
           }
