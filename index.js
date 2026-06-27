@@ -694,7 +694,7 @@ function validateSearchKeyword(keyword) {
   if (!trimmed) throw new Error('搜索关键词不能为空');
   if (trimmed.length > MAX_KEYWORD_LEN) throw new Error(`搜索关键词过长（>${MAX_KEYWORD_LEN} 字符）`);
   // 允许中文（CJK 常用汉字区）、英文、数字、空格及中英安全标点
-  if (!/^[\u4e00-\u9fa5\u3400-\u4DBF\u3001-\u3003\u3008-\u3011\u2014\u2018\u2019\u201C\u201D\u2026\uFF08\uFF09\uFF0C\uFF0E\uFF01\uFF1F\uFF1A\uFF1B\uFF5Ea-zA-Z0-9\s\-_.+&|"'()]+$/.test(trimmed)) {
+  if (!/^[\u4e00-\u9fa5\u3400-\u4DBF\u3001-\u3003\u3008-\u3011\u2014\u2018\u2019\u201C\u201D\u2026\uFF08\uFF09\uFF0C\uFF0E\uFF01\uFF1F\uFF1A\uFF1B\uFF5Ea-zA-Z0-9\s\-_.+&"'()]+$/.test(trimmed)) {
     throw new Error('搜索关键词包含非法字符，仅支持中英文、数字及常用标点');
   }
   return trimmed;
@@ -936,16 +936,19 @@ async function downloadApk(apkUrl, pkgName, downloadDir, options) {
   const timeoutSec = String(Math.max(1, Math.round((options.timeout || 30000) / 1000)));
 
   function runTool(exe, args) {
-    // 日志中脱敏代理 URL 及代理凭据参数
+    // 日志中脱敏代理 URL 及代理凭据参数（支持 --flag value 与 --flag=value 两种形式）
     const proxyAuthFlags = ['--proxy-user', '--proxy-password', '--all-proxy-user', '--all-proxy-passwd'];
     const logArgs = [];
     for (let i = 0; i < args.length; i++) {
       const a = args[i];
       if (a === options.proxy) {
         logArgs.push(maskUrl(a));
-      } else if (proxyAuthFlags.includes(a) && i + 1 < args.length) {
+      } else if (proxyAuthFlags.some((f) => a === f) && i + 1 < args.length) {
         logArgs.push(a, '***');
         i++;
+      } else if (proxyAuthFlags.some((f) => a.startsWith(`${f}=`))) {
+        const flag = a.slice(0, a.indexOf('='));
+        logArgs.push(`${flag}=***`);
       } else {
         logArgs.push(a);
       }
