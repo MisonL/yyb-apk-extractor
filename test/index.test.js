@@ -1,20 +1,25 @@
 const assert = require('assert');
+const fs = require('fs');
 const path = require('path');
 
 // 加载被测模块（不触发 CLI 主流程）
 const {
   buildAria2cProxyConfigText,
   buildCurlProxyConfigInput,
+  buildSpawnOptions,
+  cleanupTempFiles,
   createChildEnv,
   isValidPkgName,
   hasProxyCredentials,
   validateSearchKeyword,
   sanitizeTerminalOutput,
+  sanitizeProcessOutput,
   safeTencentUrl,
   validateDownloadDir,
   parseSearchResultsFromHtml,
   parseArgs,
   validateProxy,
+  writeTempConfigFile,
   splitProxyAuth,
   createReadline,
 } = require('../index.js');
@@ -252,6 +257,46 @@ test('代理凭据不进入子进程环境变量', () => {
   assert.ok(!env.HTTP_PROXY.includes('secret'));
   assert.ok(!env.ALL_PROXY.includes('secret'));
 });
+test('默认子进程环境变量不透传父进程代理凭据', () => {
+  const oldHttpsProxy = process.env.HTTPS_PROXY;
+  const oldHttpProxy = process.env.HTTP_PROXY;
+  const oldAllProxy = process.env.ALL_PROXY;
+  process.env.HTTPS_PROXY = 'http://user:secret@127.0.0.1:7890';
+  process.env.HTTP_PROXY = 'http://user:secret@127.0.0.1:7890';
+  process.env.ALL_PROXY = 'http://user:secret@127.0.0.1:7890';
+  try {
+    const env = createChildEnv({ proxy: '', ignoreProxyEnv: false });
+    assert.strictEqual(env.HTTPS_PROXY, 'http://127.0.0.1:7890/');
+    assert.strictEqual(env.HTTP_PROXY, 'http://127.0.0.1:7890/');
+    assert.strictEqual(env.ALL_PROXY, 'http://127.0.0.1:7890/');
+    assert.ok(!env.HTTPS_PROXY.includes('secret'));
+    assert.ok(!env.HTTP_PROXY.includes('secret'));
+    assert.ok(!env.ALL_PROXY.includes('secret'));
+  } finally {
+    if (oldHttpsProxy === undefined) delete process.env.HTTPS_PROXY;
+    else process.env.HTTPS_PROXY = oldHttpsProxy;
+    if (oldHttpProxy === undefined) delete process.env.HTTP_PROXY;
+    else process.env.HTTP_PROXY = oldHttpProxy;
+    if (oldAllProxy === undefined) delete process.env.ALL_PROXY;
+    else process.env.ALL_PROXY = oldAllProxy;
+  }
+});
+test('忽略代理环境变量时不传递任何代理变量', () => {
+  const oldHttpsProxy = process.env.HTTPS_PROXY;
+  process.env.HTTPS_PROXY = 'http://user:secret@127.0.0.1:7890';
+  try {
+    const env = createChildEnv({ proxy: '', ignoreProxyEnv: true });
+    assert.strictEqual(env.HTTPS_PROXY, undefined);
+  } finally {
+    if (oldHttpsProxy === undefined) delete process.env.HTTPS_PROXY;
+    else process.env.HTTPS_PROXY = oldHttpsProxy;
+  }
+});
+test('createChildEnv 默认参数不会崩溃', () => {
+  const env = createChildEnv();
+  assert.ok(env);
+  assert.strictEqual(typeof env, 'object');
+});
 test('认证代理通过工具配置输入承载，不拼入无凭据 URL', () => {
   const proxy = 'http://user:secret@127.0.0.1:7890';
   const { url } = splitProxyAuth(proxy);
@@ -260,6 +305,62 @@ test('认证代理通过工具配置输入承载，不拼入无凭据 URL', () =
   assert.ok(buildCurlProxyConfigInput(proxy).includes('secret'));
   assert.ok(buildAria2cProxyConfigText(proxy).includes('secret'));
   assert.ok(!url.includes('secret'));
+});
+test('带 stdin 的 verbose 下载命令仍继承 stdout/stderr', () => {
+  const options = buildSpawnOptions({
+    env: {},
+    stdio: 'inherit',
+    input: 'proxy = "http://user:secret@127.0.0.1:7890/"\n',
+  });
+  assert.deepStrictEqual(options.stdio, ['pipe', 'inherit', 'inherit']);
+  assert.ok(options.input.includes('secret'));
+});
+test('带 stdin 的非 verbose 下载命令保持输出可捕获', () => {
+  const options = buildSpawnOptions({
+    env: {},
+    stdio: 'pipe',
+    input: 'proxy = "http://user:secret@127.0.0.1:7890/"\n',
+  });
+  assert.deepStrictEqual(options.stdio, ['pipe', 'pipe', 'pipe']);
+});
+test('临时配置文件清理可删除凭据文件且可重复调用', () => {
+  const tempConfig = writeTempConfigFile(
+    'yyb-apk-extractor-test-',
+    buildAria2cProxyConfigText('http://user:secret@127.0.0.1:7890/')
+  );
+  assert.ok(fs.existsSync(tempConfig.filePath));
+  assert.ok(fs.readFileSync(tempConfig.filePath, 'utf8').includes('secret'));
+  const dir = path.dirname(tempConfig.filePath);
+  tempConfig.cleanup();
+  tempConfig.cleanup();
+  assert.strictEqual(fs.existsSync(dir), false);
+});
+test('进程级临时文件清理会清空待清理配置', () => {
+  const tempConfig = writeTempConfigFile(
+    'yyb-apk-extractor-test-',
+    buildAria2cProxyConfigText('http://user:secret@127.0.0.1:7890/')
+  );
+  const dir = path.dirname(tempConfig.filePath);
+  cleanupTempFiles();
+  assert.strictEqual(fs.existsSync(dir), false);
+});
+test('工具失败 stderr Buffer 可正确转成文本', () => {
+  const buf = Buffer.from('proxy failed', 'utf8');
+  assert.strictEqual(sanitizeProcessOutput(buf), 'proxy failed');
+});
+test('工具失败 stderr 中的代理凭据会脱敏', () => {
+  const text = [
+    'proxy = "http://user:secret@127.0.0.1:7890/"',
+    'all-proxy=http://user:secret@127.0.0.1:7890/',
+    'failed http://user:secret@127.0.0.1:7890/',
+    'failed socks5://user:secret@127.0.0.1:1080',
+    'failed socks5h://user:secret@127.0.0.1:1080',
+  ].join('\n');
+  const sanitized = sanitizeProcessOutput(text);
+  assert.ok(!sanitized.includes('secret'));
+  assert.ok(sanitized.includes('http://***@127.0.0.1:7890/'));
+  assert.ok(sanitized.includes('socks5://***@127.0.0.1:1080'));
+  assert.ok(sanitized.includes('socks5h://***@127.0.0.1:1080'));
 });
 
 console.log('\n=== readline 封装 ===');

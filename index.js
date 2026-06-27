@@ -57,6 +57,9 @@ const commandCache = new Map();
 const MOBILE_USER_AGENT =
   'Mozilla/5.0 (Linux; Android 10; SM-G960U) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36';
 const PROXY_ENV_KEYS = ['HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'];
+const TEMP_CLEANUP_SIGNALS = ['SIGHUP', 'SIGINT', 'SIGTERM', 'SIGBREAK'];
+const tempCleanupTasks = new Set();
+let tempCleanupHandlersInstalled = false;
 
 // 应用宝搜索相关常量
 const SEARCH_URL_TEMPLATE = 'https://sj.qq.com/search?q=';
@@ -368,43 +371,105 @@ function buildAria2cProxyConfigText(proxyUrl) {
   return `all-proxy=${proxyUrl}\n`;
 }
 
-function writeTempConfigFile(prefix, content) {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-  fs.chmodSync(dir, 0o700);
-  const filePath = path.join(dir, 'config');
-  fs.writeFileSync(filePath, content, { encoding: 'utf8', mode: 0o600 });
-  fs.chmodSync(filePath, 0o600);
-  return {
-    filePath,
-    cleanup() {
-      try {
-        fs.rmSync(dir, { recursive: true, force: true });
-      } catch {
-        // ignore
-      }
-    },
-  };
+function sanitizeProcessOutput(value) {
+  const text = Buffer.isBuffer(value)
+    ? value.toString('utf8')
+    : typeof value === 'string'
+      ? value
+      : '';
+  return maskProxySecrets(text).trim();
 }
 
-function createChildEnv(options) {
-  if (!options.ignoreProxyEnv && !options.proxy) {
-    return process.env;
+function cleanupTempFiles() {
+  for (const cleanup of Array.from(tempCleanupTasks)) {
+    cleanup();
   }
+}
 
+function installTempCleanupHandlers() {
+  if (tempCleanupHandlersInstalled) return;
+  tempCleanupHandlersInstalled = true;
+  process.once('exit', cleanupTempFiles);
+  for (const signal of TEMP_CLEANUP_SIGNALS) {
+    process.once(signal, () => {
+      cleanupTempFiles();
+      process.exit(signal === 'SIGINT' ? 130 : 143);
+    });
+  }
+}
+
+function writeTempConfigFile(prefix, content) {
+  installTempCleanupHandlers();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const filePath = path.join(dir, 'config');
+  let active = true;
+  const cleanup = () => {
+    if (!active) return;
+    active = false;
+    tempCleanupTasks.delete(cleanup);
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // ignore
+    }
+  };
+  try {
+    tempCleanupTasks.add(cleanup);
+    fs.chmodSync(dir, 0o700);
+    fs.writeFileSync(filePath, content, { encoding: 'utf8', mode: 0o600 });
+    fs.chmodSync(filePath, 0o600);
+    return {
+      filePath,
+      cleanup,
+    };
+  } catch (e) {
+    cleanup();
+    throw e;
+  }
+}
+
+function createChildEnv(options = {}) {
   const env = { ...process.env };
+  const envProxyKeys = new Set();
   for (const key of PROXY_ENV_KEYS) {
+    if (env[key]) envProxyKeys.add(key);
     delete env[key];
   }
 
+  if (options.ignoreProxyEnv) {
+    return env;
+  }
+
   if (options.proxy) {
-    // 环境变量中不暴露代理凭据
     const { url: proxyWithoutAuth } = splitProxyAuth(options.proxy);
     for (const key of PROXY_ENV_KEYS) {
       env[key] = proxyWithoutAuth;
     }
+    return env;
   }
 
+  for (const key of envProxyKeys) {
+    const { url: proxyWithoutAuth } = splitProxyAuth(process.env[key]);
+    if (proxyWithoutAuth) {
+      env[key] = proxyWithoutAuth;
+    }
+  }
   return env;
+}
+
+function buildSpawnOptions({ env, stdio, input }) {
+  const shouldPipeInput = input !== undefined && input !== null && input !== '';
+  const spawnOptions = {
+    env,
+    stdio: shouldPipeInput
+      ? ['pipe', stdio === 'inherit' ? 'inherit' : 'pipe', stdio === 'inherit' ? 'inherit' : 'pipe']
+      : stdio,
+    maxBuffer: 100 * 1024 * 1024,
+  };
+  if (shouldPipeInput) {
+    spawnOptions.input = input;
+  }
+  return spawnOptions;
 }
 
 function assertAllowedHttpUrl(value, label) {
@@ -430,6 +495,14 @@ function maskUrl(value) {
   } catch {
     return value;
   }
+}
+
+function maskProxySecrets(text) {
+  if (!text) return '';
+  return String(text)
+    .replace(/(proxy\s*=\s*")([^"]+)(")/gi, (m, a, b, c) => `${a}${maskUrl(b)}${c}`)
+    .replace(/(all-proxy=)([^\s]+)/gi, (m, a, b) => `${a}${maskUrl(b)}`)
+    .replace(/((?:https?|socks5h?):\/\/)([^@\s]+)@/gi, '$1***@');
 }
 
 // 终端输出安全净化：过滤来自网络的字符串中的 ANSI 转义序列、C1 控制字符与换行/回车
@@ -673,7 +746,7 @@ function fetchHtmlWithCurl(url, options, redirectCount = 0) {
     throw new Error(`curl 执行失败: ${result.error.message}`);
   }
   if (result.status !== 0) {
-    const stderr = (result.stderr || '').trim();
+    const stderr = sanitizeProcessOutput(result.stderr);
     throw new Error(`curl 请求失败 (exit ${result.status})${stderr ? ': ' + stderr : ''}`);
   }
 
@@ -815,7 +888,7 @@ function resolveDownloadRedirects(url, options, redirectCount = 0) {
     throw new Error(`curl 解析下载重定向失败: ${result.error.message}`);
   }
   if (result.status !== 0) {
-    const stderr = (result.stderr || '').trim();
+    const stderr = sanitizeProcessOutput(result.stderr);
     throw new Error(`curl 解析下载重定向失败 (exit ${result.status})${stderr ? ': ' + stderr : ''}`);
   }
 
@@ -968,11 +1041,7 @@ async function downloadApk(apkUrl, pkgName, downloadDir, options) {
   const ua = MOBILE_USER_AGENT;
   const referer = 'https://a.app.qq.com/';
 
-  const proxyEnv = options.proxy
-    ? createChildEnv(options)
-    : options.ignoreProxyEnv
-      ? createChildEnv(options)
-      : process.env;
+  const proxyEnv = createChildEnv(options);
   const stdio = options.verbose ? 'inherit' : 'pipe';
   const timeoutSec = String(Math.max(1, Math.round((options.timeout || 30000) / 1000)));
 
@@ -999,18 +1068,11 @@ async function downloadApk(apkUrl, pkgName, downloadDir, options) {
       }
     }
     log(options, `执行下载命令: ${exe} ${logArgs.join(' ')}`);
-    const spawnOptions = {
-      env: proxyEnv,
-      stdio: input ? 'pipe' : stdio,
-      maxBuffer: 100 * 1024 * 1024,
-    };
-    if (input) {
-      spawnOptions.input = input;
-    }
+    const spawnOptions = buildSpawnOptions({ env: proxyEnv, stdio, input });
     const result = spawnSync(exe, args, spawnOptions);
     if (result.error) throw result.error;
     if (result.status !== 0) {
-      const stderr = (result.stderr || '').trim();
+      const stderr = sanitizeProcessOutput(result.stderr);
       throw new Error(`下载工具 ${exe} 退出码 ${result.status}${stderr ? ': ' + stderr : ''}`);
     }
   }
@@ -1407,7 +1469,9 @@ if (require.main === module) {
 module.exports = {
   assertAllowedHttpUrl,
   assertAllowedHostname,
+  buildSpawnOptions,
   createChildEnv,
+  cleanupTempFiles,
   buildAria2cProxyConfigText,
   buildCurlProxyConfigInput,
   createReadline,
@@ -1429,9 +1493,11 @@ module.exports = {
   runInteractive,
   safeTencentUrl,
   sanitizeTerminalOutput,
+  sanitizeProcessOutput,
   searchApps,
   splitProxyAuth,
   validateDownloadDir,
   validateProxy,
   validateSearchKeyword,
+  writeTempConfigFile,
 };
