@@ -112,6 +112,7 @@ function showHelp() {
     ...opt('--no-proxy', '忽略环境变量代理'),
     ...opt('--download-dir=目录', '提取链接后自动下载 APK 到指定目录'),
     ...opt('--timeout=毫秒', '网络超时时间 (默认 30000)', `${c.dim}fetch 阶段为请求总时长; 下载阶段为连接/断流检测时长${c.reset}`),
+    ...opt('--insecure', '下载时跳过 HTTPS 证书校验（仅限测试环境）'),
     ...opt('--verbose, -v', '显示详细调试日志'),
     ...opt('--interactive, -i', '进入交互式向导'),
     ...opt('--version, -V', '显示版本号'),
@@ -169,6 +170,7 @@ function parseArgs(argv) {
     timeout: 30000,
     verbose: false,
     downloadDir: '',
+    insecure: false,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -196,6 +198,8 @@ function parseArgs(argv) {
       options.downloadDir = arg.slice('--download-dir='.length);
     } else if (arg === '--verbose' || arg === '-v') {
       options.verbose = true;
+    } else if (arg === '--insecure') {
+      options.insecure = true;
     } else if (arg === '--interactive' || arg === '-i') {
       interactiveFlag = true;
     } else if (arg.startsWith('-')) {
@@ -222,6 +226,9 @@ function parseArgs(argv) {
   }
 
   if (interactiveFlag) {
+    if (pkgNameOrUrl || keyword) {
+      throw new Error('--interactive 模式不支持位置参数');
+    }
     mode = 'interactive';
   }
 
@@ -234,7 +241,8 @@ function parseArgs(argv) {
   if (pkgNameOrUrl && pkgNameOrUrl.length > MAX_INPUT_LEN) {
     throw new Error(`输入过长 (>${MAX_INPUT_LEN} 字符)`);
   }
-  if (keyword && keyword.length > MAX_KEYWORD_LEN) {
+  // 关键词长度在 trim 后校验，与 validateSearchKeyword 保持一致
+  if (keyword && keyword.trim().length > MAX_KEYWORD_LEN) {
     throw new Error(`关键词过长 (>${MAX_KEYWORD_LEN} 字符)`);
   }
 
@@ -330,6 +338,21 @@ function validateProxy(proxy) {
   return parsed.toString();
 }
 
+// 将代理 URL 拆分为“无凭据 URL”和“凭据”，避免在子进程参数/环境中暴露密码
+function splitProxyAuth(proxyUrl) {
+  if (!proxyUrl) return { url: '', username: '', password: '' };
+  try {
+    const u = new URL(proxyUrl);
+    const username = u.username;
+    const password = u.password;
+    u.username = '';
+    u.password = '';
+    return { url: u.toString(), username, password };
+  } catch {
+    return { url: proxyUrl, username: '', password: '' };
+  }
+}
+
 function createChildEnv(options) {
   if (!options.ignoreProxyEnv && !options.proxy) {
     return process.env;
@@ -341,8 +364,10 @@ function createChildEnv(options) {
   }
 
   if (options.proxy) {
+    // 环境变量中不暴露代理凭据
+    const { url: proxyWithoutAuth } = splitProxyAuth(options.proxy);
     for (const key of PROXY_ENV_KEYS) {
-      env[key] = options.proxy;
+      env[key] = proxyWithoutAuth;
     }
   }
 
@@ -592,7 +617,11 @@ function fetchHtmlWithCurl(url, options, redirectCount = 0) {
   ];
 
   if (options.proxy) {
-    args.push('-x', options.proxy);
+    const { url: proxyUrl, username, password } = splitProxyAuth(options.proxy);
+    args.push('-x', proxyUrl);
+    if (username) {
+      args.push('--proxy-user', `${username}:${password}`);
+    }
   }
 
   args.push(url);
@@ -907,8 +936,20 @@ async function downloadApk(apkUrl, pkgName, downloadDir, options) {
   const timeoutSec = String(Math.max(1, Math.round((options.timeout || 30000) / 1000)));
 
   function runTool(exe, args) {
-    // 日志中脱敏代理凭据
-    const logArgs = args.map((a) => (a === options.proxy ? maskUrl(a) : a));
+    // 日志中脱敏代理 URL 及代理凭据参数
+    const proxyAuthFlags = ['--proxy-user', '--proxy-password', '--all-proxy-user', '--all-proxy-passwd'];
+    const logArgs = [];
+    for (let i = 0; i < args.length; i++) {
+      const a = args[i];
+      if (a === options.proxy) {
+        logArgs.push(maskUrl(a));
+      } else if (proxyAuthFlags.includes(a) && i + 1 < args.length) {
+        logArgs.push(a, '***');
+        i++;
+      } else {
+        logArgs.push(a);
+      }
+    }
     log(options, `执行下载命令: ${exe} ${logArgs.join(' ')}`);
     const result = spawnSync(exe, args, { env: proxyEnv, stdio, maxBuffer: 100 * 1024 * 1024 });
     if (result.error) throw result.error;
@@ -932,7 +973,14 @@ async function downloadApk(apkUrl, pkgName, downloadDir, options) {
       '-H', `Referer: ${referer}`,
     ];
     if (options.proxy) {
-      curlArgs.push('--proxy', options.proxy);
+      const { url: proxyUrl, username, password } = splitProxyAuth(options.proxy);
+      curlArgs.push('--proxy', proxyUrl);
+      if (username) {
+        curlArgs.push('--proxy-user', `${username}:${password}`);
+      }
+    }
+    if (options.insecure) {
+      curlArgs.push('--insecure');
     }
     curlArgs.push(safeApkUrl);
     runTool(curl, curlArgs);
@@ -955,7 +1003,14 @@ async function downloadApk(apkUrl, pkgName, downloadDir, options) {
     ];
     if (options.proxy) {
       // aria2c 推荐显式指定 --all-proxy，仅依赖环境变量可能不一致
-      aria2cArgs.push('--all-proxy', options.proxy);
+      const { url: proxyUrl, username, password } = splitProxyAuth(options.proxy);
+      aria2cArgs.push('--all-proxy', proxyUrl);
+      if (username) {
+        aria2cArgs.push('--all-proxy-user', username, '--all-proxy-passwd', password);
+      }
+    }
+    if (options.insecure) {
+      aria2cArgs.push('--check-certificate=false');
     }
     aria2cArgs.push(safeApkUrl);
     runTool(aria2c, aria2cArgs);
@@ -965,16 +1020,25 @@ async function downloadApk(apkUrl, pkgName, downloadDir, options) {
         if (options.proxy && /^socks5h?:\/\//i.test(options.proxy)) {
           throw new Error('wget 对 socks5/socks5h 代理支持不稳定，请安装 curl 或使用 http:// 代理');
         }
-        runTool(wget, [
+        const wgetArgs = [
           '-T', timeoutSec,
           '-c', // 断点续传
           '--max-redirect=0',
-          '--no-check-certificate',
           '-O', filePath,
           `--user-agent=${ua}`,
           `--referer=${referer}`,
-          safeApkUrl,
-        ]);
+        ];
+        if (options.proxy) {
+          const { username, password } = splitProxyAuth(options.proxy);
+          if (username) {
+            wgetArgs.push(`--proxy-user=${username}`, `--proxy-password=${password}`);
+          }
+        }
+        if (options.insecure) {
+          wgetArgs.push('--no-check-certificate');
+        }
+        wgetArgs.push(safeApkUrl);
+        runTool(wget, wgetArgs);
       } else {
         throw new Error('未找到可用的下载工具（aria2c / curl / wget），无法下载 APK');
       }
@@ -1298,6 +1362,7 @@ module.exports = {
   safeTencentUrl,
   sanitizeTerminalOutput,
   searchApps,
+  splitProxyAuth,
   validateDownloadDir,
   validateProxy,
   validateSearchKeyword,

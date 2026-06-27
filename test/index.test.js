@@ -9,6 +9,10 @@ const {
   safeTencentUrl,
   validateDownloadDir,
   parseSearchResultsFromHtml,
+  parseArgs,
+  validateProxy,
+  splitProxyAuth,
+  createReadline,
 } = require('../index.js');
 
 function test(name, fn) {
@@ -171,6 +175,80 @@ test('接口返回异常抛出错误', () => {
     {"props":{"pageProps":{"dynamicCardResponse":{"ret":-1,"msg":"fail"}}}}
   </script>`;
   assert.throws(() => parseSearchResultsFromHtml(html), /接口返回异常/);
+});
+
+console.log('\n=== 参数解析 ===');
+test('直接模式解析包名', () => {
+  const { mode, pkgNameOrUrl, keyword, options } = parseArgs(['node', 'index.js', 'com.example.app']);
+  assert.strictEqual(mode, 'direct');
+  assert.strictEqual(pkgNameOrUrl, 'com.example.app');
+  assert.strictEqual(keyword, '');
+  assert.strictEqual(options.verbose, false);
+});
+test('搜索模式解析关键词并 trim 后校验长度', () => {
+  const { mode, keyword } = parseArgs(['node', 'index.js', 'search', '  微信  ']);
+  assert.strictEqual(mode, 'search');
+  assert.strictEqual(keyword, '  微信  ');
+});
+test('超长关键词（trim 后合法）不被误拒', () => {
+  // 100 个 a + 首尾空格 => trim 后为 100，应合法
+  const { mode, keyword } = parseArgs(['node', 'index.js', 'search', ` ${'a'.repeat(100)} `]);
+  assert.strictEqual(mode, 'search');
+  assert.strictEqual(keyword.trim().length, 100);
+});
+test('超长关键词（trim 后仍超长）被拒绝', () => {
+  assert.throws(() => parseArgs(['node', 'index.js', 'search', ` ${'a'.repeat(101)} `]), /关键词过长/);
+});
+test('交互模式不接受位置参数', () => {
+  assert.throws(() => parseArgs(['node', 'index.js', '--interactive', 'com.example.app']), /--interactive 模式不支持位置参数/);
+});
+test('解析 --insecure、--verbose、--timeout、--download-dir', () => {
+  const { options } = parseArgs([
+    'node', 'index.js', 'com.example.app',
+    '--insecure', '--verbose', '--timeout=60000', '--download-dir=./dl',
+  ]);
+  assert.strictEqual(options.insecure, true);
+  assert.strictEqual(options.verbose, true);
+  assert.strictEqual(options.timeout, 60000);
+  assert.strictEqual(options.downloadDir, './dl');
+});
+
+console.log('\n=== 代理校验 ===');
+test('合法代理 URL 通过', () => {
+  assert.strictEqual(validateProxy('http://127.0.0.1:7890'), 'http://127.0.0.1:7890/');
+  assert.strictEqual(validateProxy('socks5h://127.0.0.1:1080'), 'socks5h://127.0.0.1:1080');
+});
+test('代理凭据校验通过', () => {
+  assert.strictEqual(validateProxy('http://user:pass@127.0.0.1:7890'), 'http://user:pass@127.0.0.1:7890/');
+});
+test('非法代理协议拒绝', () => {
+  assert.throws(() => validateProxy('ftp://127.0.0.1:7890'), /仅支持/);
+});
+test('splitProxyAuth 剥离凭据', () => {
+  const result = splitProxyAuth('http://user:pass@127.0.0.1:7890');
+  assert.strictEqual(result.url, 'http://127.0.0.1:7890/');
+  assert.strictEqual(result.username, 'user');
+  assert.strictEqual(result.password, 'pass');
+});
+test('splitProxyAuth 无凭据代理返回空凭据', () => {
+  const result = splitProxyAuth('http://127.0.0.1:7890');
+  assert.strictEqual(result.url, 'http://127.0.0.1:7890/');
+  assert.strictEqual(result.username, '');
+  assert.strictEqual(result.password, '');
+});
+
+console.log('\n=== readline 封装 ===');
+test('createReadline 返回 ask/isClosed/rl', () => {
+  const { ask, isClosed, rl } = createReadline();
+  assert.strictEqual(typeof ask, 'function');
+  assert.strictEqual(typeof isClosed, 'function');
+  assert.ok(rl);
+  rl.close();
+});
+test('createReadline 关闭后 isClosed 为 true', () => {
+  const { rl, isClosed } = createReadline();
+  rl.close();
+  assert.strictEqual(isClosed(), true);
 });
 
 console.log('\n测试完成。');
