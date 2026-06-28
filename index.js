@@ -14,7 +14,10 @@
  *                       建议 Clash/V2Ray 混合端口用 http:// 或 socks5h://（远程 DNS）
  *   --no-proxy          忽略环境变量代理
  *   --download-dir=目录 提取链接后自动下载 APK 到指定目录
- *   --timeout=毫秒      网络超时时间(默认 30000)。fetch 阶段为请求总时长；
+ *   --downloader=工具   下载工具：auto/curl/aria2c/wget，默认 auto
+ *   --multi-thread      使用 aria2c 多连接下载（需本机安装 aria2c）
+ *   --connections=数量  aria2c 连接数，默认 16，范围 1-16
+ *   --timeout=时长      网络超时时间(默认 30000)。fetch 阶段为请求总时长；
  *                       下载阶段为连接/断流检测时长，不限制大文件总下载时间
  *   --verbose, -v       显示详细调试日志
  *   --version, -V       显示版本号
@@ -26,6 +29,8 @@
  *   node index.js com.example.app --proxy=http://127.0.0.1:7890
  *   node index.js com.example.app --proxy=socks5h://127.0.0.1:7890
  *   node index.js com.example.app --download-dir=./downloads
+ *   node index.js com.example.app --download-dir=./downloads --multi-thread --connections=8
+ *   node index.js doctor
  *
  * 代理说明:
  *   - http://  最稳，适合 Clash/V2Ray 混合代理端口
@@ -63,10 +68,12 @@ let tempCleanupHandlersInstalled = false;
 
 // 应用宝搜索相关常量
 const SEARCH_URL_TEMPLATE = 'https://sj.qq.com/search?q=';
-const INTERACTIVE_INPUT_MAX_LEN = 100;
-const MAX_KEYWORD_LEN = INTERACTIVE_INPUT_MAX_LEN;
-const SEARCH_RESULT_LIMIT = 20;
+const INTERACTIVE_INPUT_MAX_LEN = 2048;
+const MAX_KEYWORD_LEN = 100;
+const MAX_DOWNLOAD_CONNECTIONS = 16;
+const DOWNLOADERS = ['auto', 'curl', 'aria2c', 'wget'];
 const ALLOWED_SEARCH_HOSTNAMES = ['sj.qq.com'];
+const DEFAULT_DOWNLOAD_DIR = './downloads';
 
 // 终端颜色支持：非 TTY 或设置 NO_COLOR/--no-color 时禁用，保证管道输出干净
 const noColorFlag = process.argv.includes('--no-color');
@@ -99,6 +106,10 @@ function showVersion() {
   process.exit(0);
 }
 
+function resolveInteractiveDownloadDir(options = {}) {
+  return options.downloadDir || DEFAULT_DOWNLOAD_DIR;
+}
+
 function showHelp() {
   const title = `${c.bold}${c.cyan}应用宝 APK 下载链接提取器${c.reset} ${c.dim}v${VERSION}${c.reset}`;
   const lines = [
@@ -106,15 +117,21 @@ function showHelp() {
     title,
     '',
     `${c.bold}用法:${c.reset}`,
-    `  ${c.yellow}node index.js${c.reset} ${c.green}<包名或应用宝详情页URL>${c.reset} [选项]`,
+    `  ${c.yellow}node index.js${c.reset} ${c.green}<包名>${c.reset} [选项]                 ${c.dim}提取 APK 直链${c.reset}`,
+    `  ${c.yellow}node index.js${c.reset} ${c.green}<应用宝详情页URL>${c.reset} [选项]     ${c.dim}解析后下载到 ${DEFAULT_DOWNLOAD_DIR}${c.reset}`,
+    `  ${c.yellow}node index.js${c.reset}            ${c.dim}无参数时直接进入交互模式${c.reset}`,
     `  ${c.yellow}node index.js search${c.reset} ${c.green}<关键词>${c.reset} [选项]`,
+    `  ${c.yellow}node index.js doctor${c.reset}      ${c.dim}检查本机下载工具与运行环境${c.reset}`,
     `  ${c.yellow}node index.js --interactive${c.reset}`,
     '',
     `${c.bold}选项:${c.reset}`,
     ...opt('--proxy=地址', '设置代理, 支持 http/https/socks5/socks5h', `${c.dim}建议 Clash/V2Ray 混合端口用 http:// 或 socks5h://${c.reset}`),
     ...opt('--no-proxy', '忽略环境变量代理'),
-    ...opt('--download-dir=目录', '提取链接后自动下载 APK 到指定目录'),
-    ...opt('--timeout=毫秒', '网络超时时间 (默认 30000)', `${c.dim}fetch 阶段为请求总时长; 下载阶段为连接/断流检测时长${c.reset}`),
+    ...opt('--download-dir=目录', '指定 APK 下载目录', `${c.dim}包名输入时启用下载; URL 输入时覆盖默认 ${DEFAULT_DOWNLOAD_DIR}${c.reset}`),
+    ...opt('--downloader=工具', '指定下载工具: auto/curl/aria2c/wget'),
+    ...opt('--multi-thread', '优先使用 aria2c 多连接下载'),
+    ...opt('--connections=数量', `aria2c 连接数 (默认 ${MAX_DOWNLOAD_CONNECTIONS}, 范围 1-${MAX_DOWNLOAD_CONNECTIONS})`),
+    ...opt('--timeout=时长', '网络超时时间 (默认 30000)', `${c.dim}可写整数毫秒或带单位的时长, 例如 500ms / 10s / 5m${c.reset}`),
     ...opt('--insecure', '下载时跳过 HTTPS 证书校验（仅限测试环境）'),
     ...opt('--verbose, -v', '显示详细调试日志'),
     ...opt('--interactive, -i', '进入交互式向导'),
@@ -128,11 +145,14 @@ function showHelp() {
     '',
     `  ${c.dim}# 输入应用宝详情页 URL${c.reset}`,
     `  ${c.yellow}node index.js${c.reset} ${c.green}https://sj.qq.com/appdetail/com.example.app${c.reset}`,
+    `  ${c.dim}# URL 会解析后自动下载到 ${DEFAULT_DOWNLOAD_DIR}${c.reset}`,
     '',
     `  ${c.dim}# 搜索应用${c.reset}`,
     `  ${c.yellow}node index.js search${c.reset} ${c.green}微信${c.reset}`,
     '',
     `  ${c.dim}# 进入交互模式${c.reset}`,
+    `  ${c.yellow}node index.js${c.reset}`,
+    `  ${c.dim}# 也可显式使用 --interactive${c.reset}`,
     `  ${c.yellow}node index.js --interactive${c.reset}`,
     '',
     `  ${c.dim}# 使用 HTTP 代理 (推荐)${c.reset}`,
@@ -144,8 +164,15 @@ function showHelp() {
     `  ${c.dim}# 自动下载到指定目录${c.reset}`,
     `  ${c.yellow}node index.js${c.reset} ${c.green}com.example.app${c.reset} --download-dir=${c.cyan}./downloads${c.reset}`,
     '',
+    `  ${c.dim}# 使用 aria2c 多连接下载大 APK${c.reset}`,
+    `  ${c.yellow}node index.js${c.reset} ${c.green}com.example.app${c.reset} --download-dir=${c.cyan}./downloads${c.reset} --multi-thread --connections=${c.cyan}8${c.reset}`,
+    '',
+    `  ${c.dim}# 检查本机环境${c.reset}`,
+    `  ${c.yellow}node index.js doctor${c.reset}`,
+    '',
     `${c.bold}环境变量:${c.reset}`,
     `  ${c.cyan}HTTPS_PROXY${c.reset} / ${c.cyan}https_proxy${c.reset} / ${c.cyan}HTTP_PROXY${c.reset} / ${c.cyan}http_proxy${c.reset}`,
+    `  ${c.cyan}ALL_PROXY${c.reset} / ${c.cyan}all_proxy${c.reset}`,
     `  ${c.dim}按上述优先级自动读取默认代理${c.reset}`,
     '',
   ];
@@ -155,6 +182,7 @@ function showHelp() {
 
 function parseArgs(argv) {
   const args = argv.slice(2);
+  const positionArgs = args.filter((arg) => !arg.startsWith('-'));
   let mode = 'direct';
   let pkgNameOrUrl = '';
   let keyword = '';
@@ -174,6 +202,9 @@ function parseArgs(argv) {
     verbose: false,
     downloadDir: '',
     insecure: false,
+    downloader: 'auto',
+    multiThread: false,
+    connections: MAX_DOWNLOAD_CONNECTIONS,
   };
 
   for (let i = 0; i < args.length; i++) {
@@ -191,14 +222,15 @@ function parseArgs(argv) {
       options.proxy = validateProxy(arg.slice('--proxy='.length));
       options.ignoreProxyEnv = false;
     } else if (arg.startsWith('--timeout=')) {
-      const raw = arg.slice('--timeout='.length);
-      const parsed = Number(raw);
-      if (!Number.isInteger(parsed) || parsed <= 0 || String(parsed) !== raw) {
-        throw new Error('--timeout 必须是正整数毫秒');
-      }
-      options.timeout = parsed;
+      options.timeout = parseTimeoutMs(arg.slice('--timeout='.length), '--timeout');
     } else if (arg.startsWith('--download-dir=')) {
       options.downloadDir = arg.slice('--download-dir='.length);
+    } else if (arg.startsWith('--downloader=')) {
+      options.downloader = parseDownloader(arg.slice('--downloader='.length), '--downloader');
+    } else if (arg === '--multi-thread') {
+      options.multiThread = true;
+    } else if (arg.startsWith('--connections=')) {
+      options.connections = parseConnections(arg.slice('--connections='.length), '--connections');
     } else if (arg === '--verbose' || arg === '-v') {
       options.verbose = true;
     } else if (arg === '--insecure') {
@@ -228,10 +260,19 @@ function parseArgs(argv) {
     }
   }
 
+  if (pkgNameOrUrl === 'doctor') {
+    mode = 'doctor';
+    pkgNameOrUrl = '';
+  }
+
   if (interactiveFlag) {
-    if (pkgNameOrUrl || keyword) {
+    if (positionArgs.length > 0) {
       throw new Error('--interactive 模式不支持位置参数');
     }
+    mode = 'interactive';
+  }
+
+  if (mode === 'direct' && !pkgNameOrUrl && !interactiveFlag) {
     mode = 'interactive';
   }
 
@@ -263,6 +304,52 @@ function parseArgs(argv) {
   return { mode, pkgNameOrUrl, keyword, options };
 }
 
+function parseTimeoutMs(raw, label = 'timeout') {
+  const value = String(raw || '').trim();
+  const match = value.match(/^(\d+)(ms|s|m)?$/i);
+  if (!match) {
+    throw new Error(`${label} 必须是正整数毫秒，或带单位的时长（如 500ms、10s、5m）`);
+  }
+  const amount = Number(match[1]);
+  if (amount <= 0) {
+    throw new Error(`${label} 必须是正整数`);
+  }
+  if (!Number.isSafeInteger(amount)) {
+    throw new Error(`${label} 过大`);
+  }
+  const unit = (match[2] || 'ms').toLowerCase();
+  const multiplier = unit === 'm' ? 60000 : unit === 's' ? 1000 : 1;
+  const result = amount * multiplier;
+  if (!Number.isSafeInteger(result)) {
+    throw new Error(`${label} 过大`);
+  }
+  return result;
+}
+
+function parseDownloader(raw, label = 'downloader') {
+  const value = String(raw || '').trim().toLowerCase();
+  if (!DOWNLOADERS.includes(value)) {
+    throw new Error(`${label} 仅支持 ${DOWNLOADERS.join('/')}`);
+  }
+  return value;
+}
+
+function parseConnections(raw, label = 'connections') {
+  const value = String(raw || '').trim();
+  if (!/^\d+$/.test(value)) {
+    throw new Error(`${label} 必须是 1-${MAX_DOWNLOAD_CONNECTIONS} 之间的整数`);
+  }
+  const connections = Number(value);
+  if (!Number.isInteger(connections) || connections < 1 || connections > MAX_DOWNLOAD_CONNECTIONS) {
+    throw new Error(`${label} 必须是 1-${MAX_DOWNLOAD_CONNECTIONS} 之间的整数`);
+  }
+  return connections;
+}
+
+function timeoutSeconds(options = {}) {
+  return String(Math.max(1, Math.ceil((options.timeout || 30000) / 1000)));
+}
+
 function validateDownloadDir(dir, label = '下载目录') {
   if (dir === '') return;
   if (!dir.trim()) {
@@ -288,6 +375,20 @@ function normalizeUrl(input) {
   }
   const pkgName = trimmed.replace(/^\/+|\/+$/g, '');
   return `https://sj.qq.com/appdetail/${pkgName}`;
+}
+
+function isHttpUrl(input) {
+  return typeof input === 'string' && /^https?:\/\//i.test(input.trim());
+}
+
+function resolveDirectDownloadDir(input, options = {}) {
+  if (options.downloadDir) return options.downloadDir;
+  return isHttpUrl(input) ? DEFAULT_DOWNLOAD_DIR : '';
+}
+
+function isDirectAppInput(input) {
+  const trimmed = typeof input === 'string' ? input.trim() : '';
+  return isHttpUrl(trimmed) || isValidPkgName(trimmed);
 }
 
 function isValidPkgName(name) {
@@ -319,6 +420,43 @@ function isAria2cProxySupported(proxy) {
   // aria2c --all-proxy 支持 http:// 与 https:// 代理；socks5/socks5h 等会报 unrecognized proxy format
   if (!proxy) return true;
   return /^https?:\/\//i.test(proxy);
+}
+
+function getDownloadOrder(options = {}) {
+  const downloader = options.downloader || 'auto';
+  if (downloader !== 'auto') return [downloader];
+  if (options.multiThread) return ['aria2c', 'curl', 'wget'];
+  return ['curl', 'aria2c', 'wget'];
+}
+
+function selectDownloader(options = {}, find = findCommand) {
+  const unavailable = [];
+  for (const downloader of getDownloadOrder(options)) {
+    const command = find([downloader]);
+    if (!command) {
+      unavailable.push(`${downloader}: 未安装`);
+      continue;
+    }
+    if (downloader === 'aria2c' && !isAria2cProxySupported(options.proxy)) {
+      unavailable.push('aria2c: 不支持 socks5/socks5h 代理');
+      continue;
+    }
+    if (downloader === 'wget' && options.proxy && hasProxyCredentials(options.proxy)) {
+      unavailable.push('wget: 不支持安全传递代理凭据');
+      continue;
+    }
+    if (downloader === 'wget' && options.proxy && /^socks5h?:\/\//i.test(options.proxy)) {
+      unavailable.push('wget: 不支持 socks5/socks5h 代理');
+      continue;
+    }
+    return { downloader, command };
+  }
+
+  const requested = options.downloader && options.downloader !== 'auto'
+    ? `无法使用 --downloader=${options.downloader}`
+    : '未找到可用的下载工具';
+  const detail = unavailable.length ? ` (${unavailable.join('; ')})` : '';
+  throw new Error(`${requested}${detail}`);
 }
 
 function validateProxy(proxy) {
@@ -513,6 +651,15 @@ function sanitizeTerminalOutput(str) {
     .replace(/[\x00-\x1f\x7f\u0080-\u009f]/g, '');
 }
 
+function escapeRegExp(str) {
+  return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function allowedHostPattern(host) {
+  const escaped = escapeRegExp(host).replace(/\\\*/g, '[a-z0-9-]+');
+  return new RegExp(`^${escaped}$`, 'i');
+}
+
 // 安全 URL 校验：仅接受 http/https，且目标域名在腾讯/应用宝可控范围内
 function safeTencentUrl(value, allowedHosts = []) {
   if (typeof value !== 'string' || !value.trim()) return '';
@@ -529,7 +676,7 @@ function safeTencentUrl(value, allowedHosts = []) {
     /^[a-z0-9-]+(\.[a-z0-9-]+)*\.myapp\.com$/,
     /^[a-z0-9-]+(\.[a-z0-9-]+)*\.qpic\.cn$/,
     /^[a-z0-9-]+(\.[a-z0-9-]+)*\.qlogo\.cn$/,
-    ...allowedHosts.map((h) => new RegExp(`^${h.replace(/\./g, '\\.').replace(/\*/g, '[a-z0-9-]+')}$`, 'i')),
+    ...allowedHosts.map(allowedHostPattern),
   ];
   if (!safePatterns.some((re) => re.test(host))) return '';
   return parsed.toString();
@@ -600,6 +747,51 @@ function findCommand(names) {
   }
   commandCache.set(key, null);
   return null;
+}
+
+function collectDoctorInfo({ find = findCommand, platform = process.platform, nodeVersion = process.version } = {}) {
+  const toolNames = ['curl', 'aria2c', 'wget'];
+  const tools = {};
+  for (const name of toolNames) {
+    const command = find([name]);
+    tools[name] = {
+      available: Boolean(command),
+      command: command || '',
+    };
+  }
+
+  const notes = [];
+  if (!tools.curl.available) {
+    notes.push('未检测到 curl：无代理时可回退 Node.js 内置请求，代理访问会受限');
+  }
+  if (!tools.aria2c.available) {
+    notes.push('未检测到 aria2c：--multi-thread 或 --downloader=aria2c 不可用');
+  }
+  if (!tools.curl.available && !tools.aria2c.available && !tools.wget.available) {
+    notes.push('未检测到 curl/aria2c/wget：无法自动下载 APK');
+  }
+
+  return {
+    nodeVersion,
+    platform,
+    tools,
+    notes,
+  };
+}
+
+function formatDoctorSummary(info) {
+  const lines = [
+    '环境检查',
+    `Node.js: ${info.nodeVersion}`,
+    `平台: ${info.platform}`,
+  ];
+  for (const [name, tool] of Object.entries(info.tools)) {
+    lines.push(`${name}: ${tool.available ? `可用 (${tool.command})` : '未检测到'}`);
+  }
+  for (const note of info.notes) {
+    lines.push(`提示: ${note}`);
+  }
+  return lines.join('\n');
 }
 
 function assertAllowedHostname(hostname, context) {
@@ -711,7 +903,7 @@ function fetchHtmlWithCurl(url, options, redirectCount = 0) {
   if (!curl) return null;
   assertAllowedHttpUrl(url, '请求');
 
-  const timeoutSec = String(Math.max(1, Math.round((options.timeout || 30000) / 1000)));
+  const timeoutSec = timeoutSeconds(options);
   const args = [
     '-s', // 静默
     '-D', '-', // 将响应头输出到 stdout，便于手动处理重定向
@@ -801,50 +993,110 @@ function validateSearchKeyword(keyword) {
   const trimmed = keyword.trim();
   if (!trimmed) throw new Error('搜索关键词不能为空');
   if (trimmed.length > MAX_KEYWORD_LEN) throw new Error(`搜索关键词过长（>${MAX_KEYWORD_LEN} 字符）`);
-  // 允许中文（CJK 常用汉字区）、英文、数字、空格及中英安全标点
-  if (!/^[\u4e00-\u9fa5\u3400-\u4DBF\u3001-\u3003\u3008-\u3011\u2014\u2018\u2019\u201C\u201D\u2026\uFF08\uFF09\uFF0C\uFF0E\uFF01\uFF1F\uFF1A\uFF1B\uFF5Ea-zA-Z0-9\s\-_.+&"'()]+$/.test(trimmed)) {
+  // 允许中文（CJK 常用汉字区）、英文、数字、空格及常见程序/应用名标点
+  if (!/^[\u4e00-\u9fa5\u3400-\u4DBF\u3001-\u3003\u3008-\u3011\u2014\u2018\u2019\u201C\u201D\u2026\uFF08\uFF09\uFF0C\uFF0E\uFF01\uFF1F\uFF1A\uFF1B\uFF5Ea-zA-Z0-9\s\-_.+&"'()#%@*\/]+$/.test(trimmed)) {
     throw new Error('搜索关键词包含非法字符，仅支持中英文、数字及常用标点');
   }
   return trimmed;
 }
 
-function parseSearchResultsFromHtml(html) {
-  if (!html) return [];
+function parseNextDataFromHtml(html) {
   const m = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-  if (!m) throw new Error('未能从搜索页解析 __NEXT_DATA__');
+  if (!m) throw new Error('未能从页面解析 __NEXT_DATA__');
 
-  let data;
   try {
-    data = JSON.parse(m[1]);
+    return JSON.parse(m[1]);
   } catch (e) {
-    throw new Error('搜索页 __NEXT_DATA__ JSON 解析失败');
+    throw new Error('__NEXT_DATA__ JSON 解析失败');
   }
+}
 
+function getDynamicCardResponse(html) {
+  const data = parseNextDataFromHtml(html);
   const dcr = data?.props?.pageProps?.dynamicCardResponse;
   if (!dcr || dcr.ret !== 0) {
-    throw new Error(`搜索接口返回异常: ${dcr?.msg || '未知错误'}`);
+    throw new Error(`应用宝接口返回异常: ${dcr?.msg || '未知错误'}`);
   }
+  return dcr;
+}
 
+function appInfoFromItem(item) {
+  if (!item || typeof item !== 'object') return null;
+  if (!item.pkg_name || !isValidPkgName(item.pkg_name)) return null;
+  return {
+    pkgName: item.pkg_name,
+    appId: item.app_id,
+    name: sanitizeTerminalOutput(item.name),
+    developer: sanitizeTerminalOutput(item.developer),
+    version: sanitizeTerminalOutput(item.version_name),
+    icon: safeTencentUrl(item.icon),
+    apkSize: Number(item.apk_size) || 0,
+    rating: item.average_rating,
+    intro: sanitizeTerminalOutput(item.editor_intro),
+    detailUrl: `https://sj.qq.com/appdetail/${item.pkg_name}`,
+    rawDownloadUrl: safeTencentUrl(item.download_url),
+  };
+}
+
+function parseAppEntriesFromHtml(html, limit = Infinity) {
+  if (!html) return [];
+  const dcr = getDynamicCardResponse(html);
   const results = [];
-  for (const comp of dcr.data?.components || []) {
-    for (const item of comp.data?.itemData || []) {
-      if (!item.pkg_name || !isValidPkgName(item.pkg_name)) continue;
-      results.push({
-        pkgName: item.pkg_name,
-        appId: item.app_id,
-        name: sanitizeTerminalOutput(item.name),
-        developer: sanitizeTerminalOutput(item.developer),
-        version: sanitizeTerminalOutput(item.version_name),
-        icon: safeTencentUrl(item.icon),
-        apkSize: Number(item.apk_size) || 0,
-        rating: item.average_rating,
-        intro: sanitizeTerminalOutput(item.editor_intro),
-        detailUrl: `https://sj.qq.com/appdetail/${item.pkg_name}`,
-        rawDownloadUrl: safeTencentUrl(item.download_url),
-      });
+  const components = Array.isArray(dcr.data?.components) ? dcr.data.components : [];
+  for (const comp of components) {
+    const itemData = Array.isArray(comp?.data?.itemData) ? comp.data.itemData : [];
+    for (const item of itemData) {
+      const entry = appInfoFromItem(item);
+      if (!entry) continue;
+      results.push(entry);
+      if (results.length >= limit) return results;
     }
   }
-  return results.slice(0, SEARCH_RESULT_LIMIT);
+  return results;
+}
+
+function dedupeAppEntries(entries) {
+  const seen = new Set();
+  const results = [];
+  for (const entry of entries || []) {
+    if (!entry || !entry.pkgName || seen.has(entry.pkgName)) continue;
+    seen.add(entry.pkgName);
+    results.push(entry);
+  }
+  return results;
+}
+
+function parseSearchResultsFromHtml(html) {
+  return dedupeAppEntries(parseAppEntriesFromHtml(html));
+}
+
+function findAppInfoFromHtml(html, pkgName) {
+  return parseAppEntriesFromHtml(html).find((entry) => entry.pkgName === pkgName) || null;
+}
+
+function sanitizeDownloadFileName(name, fallbackName) {
+  const fallback = fallbackName || 'download.apk';
+  let fileName = String(name || fallback);
+  fileName = path.posix.basename(fileName.replace(/\\/g, '/'));
+  fileName = fileName.replace(/[\x00-\x1f\x7f<>:"|?*]/g, '_').trim();
+  fileName = fileName.replace(/[. ]+$/g, '');
+  if (!fileName || fileName === '.' || fileName === '/') {
+    fileName = fallback;
+  }
+
+  const ext = path.extname(fileName);
+  const base = ext ? fileName.slice(0, -ext.length) : fileName;
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(base)) {
+    fileName = `_${fileName}`;
+  }
+
+  const maxLength = 180;
+  if (fileName.length > maxLength) {
+    const safeExt = ext.length < 32 ? ext : '';
+    const safeBase = safeExt ? fileName.slice(0, -safeExt.length) : fileName;
+    fileName = `${safeBase.slice(0, maxLength - safeExt.length)}${safeExt}`;
+  }
+  return fileName;
 }
 
 function resolveDownloadRedirects(url, options, redirectCount = 0) {
@@ -856,7 +1108,7 @@ function resolveDownloadRedirects(url, options, redirectCount = 0) {
   const curl = findCommand(['curl']);
   if (!curl) return safeUrl;
 
-  const timeoutSec = String(Math.max(1, Math.round((options.timeout || 30000) / 1000)));
+  const timeoutSec = timeoutSeconds(options);
   const args = [
     '-s',
     '-D', '-',
@@ -1007,8 +1259,37 @@ async function searchApps(keyword, options) {
   return { query: q, count: results.length, results };
 }
 
-async function downloadApk(apkUrl, pkgName, downloadDir, options) {
-  const safeApkUrl = resolveDownloadRedirects(apkUrl, options);
+async function fetchAppInfo(pkgName, options) {
+  const detailUrl = `https://sj.qq.com/appdetail/${encodeURIComponent(pkgName)}`;
+  log(options, `请求应用详情页: ${detailUrl}`);
+
+  let html = null;
+  try {
+    html = retrySync(() => fetchHtmlWithCurl(detailUrl, options), 3);
+  } catch (e) {
+    if (options.proxy) throw e;
+    log(options, `curl 获取详情失败，回退到 Node.js 内置模块: ${e.message}`);
+  }
+
+  if (html === null) {
+    if (options.proxy) {
+      throw new Error('未检测到 curl，无法通过代理获取详情。请安装 curl，或移除 --proxy。');
+    }
+    html = await retryAsync(() => fetchHtmlWithNode(detailUrl, options), 3);
+  }
+
+  const appInfo = findAppInfoFromHtml(html, pkgName);
+  if (!appInfo) {
+    throw new Error(`未在详情页找到应用信息: ${pkgName}`);
+  }
+  return appInfo;
+}
+
+async function downloadApk(apkUrl, pkgName, downloadDir, options = {}) {
+  const selected = selectDownloader(options);
+  const safeApkUrl = selected.downloader === 'aria2c'
+    ? assertAllowedHttpUrl(apkUrl, 'APK 下载地址').toString()
+    : resolveDownloadRedirects(apkUrl, options);
 
   if (!fs.existsSync(downloadDir)) {
     fs.mkdirSync(downloadDir, { recursive: true });
@@ -1024,13 +1305,7 @@ async function downloadApk(apkUrl, pkgName, downloadDir, options) {
     // ignore
   }
 
-  // 安全：仅保留文件名部分，防止路径遍历（如 fsname=../evil.apk 或 a/b\\c.apk）
-  // 统一使用 POSIX 路径语义处理，再移除控制字符与路径分隔符残留
-  fileName = path.posix.basename(fileName.replace(/\\/g, '/'));
-  fileName = fileName.replace(/[\x00-\x1f]/g, '');
-  if (!fileName || fileName === '.' || fileName === '/') {
-    fileName = `${pkgName}.apk`;
-  }
+  fileName = sanitizeDownloadFileName(fileName, `${pkgName}.apk`);
 
   const filePath = path.resolve(downloadDir, fileName);
   log(options, `开始下载 APK 到: ${filePath}`);
@@ -1043,7 +1318,7 @@ async function downloadApk(apkUrl, pkgName, downloadDir, options) {
 
   const proxyEnv = createChildEnv(options);
   const stdio = options.verbose ? 'inherit' : 'pipe';
-  const timeoutSec = String(Math.max(1, Math.round((options.timeout || 30000) / 1000)));
+  const timeoutSec = timeoutSeconds(options);
 
   function runTool(exe, args) {
     return runToolWithInput(exe, args, '');
@@ -1077,9 +1352,7 @@ async function downloadApk(apkUrl, pkgName, downloadDir, options) {
     }
   }
 
-  // 下载阶段优先使用 curl，避免外部工具自动跟随未校验的跨域重定向。
-  const curl = findCommand(['curl']);
-  if (curl) {
+  if (selected.downloader === 'curl') {
     const curlArgs = [
       '--fail',
       '--connect-timeout', timeoutSec, // 连接建立超时
@@ -1104,72 +1377,65 @@ async function downloadApk(apkUrl, pkgName, downloadDir, options) {
       curlArgs.push('--insecure');
     }
     curlArgs.push(safeApkUrl);
-    runToolWithInput(curl, curlArgs, curlInput);
-  } else {
-    const aria2c = findCommand(['aria2c']);
-    if (aria2c && isAria2cProxySupported(options.proxy)) {
-      const aria2cArgs = [
-        '-x', '16',
-        '-s', '16',
-        '--continue=true', // 断点续传
-        '--allow-overwrite=true',
-        '--auto-file-renaming=false',
-        '--timeout', timeoutSec,
-        '--connect-timeout', timeoutSec,
-        '--lowest-speed-limit=1024',
-        '-o', fileName,
-        '--dir', downloadDir,
-        '--header', `User-Agent: ${ua}`,
-        '--header', `Referer: ${referer}`,
-      ];
-      let aria2cConfig = null;
-      if (options.proxy) {
-        const { url: proxyUrl } = splitProxyAuth(options.proxy);
-        if (hasProxyCredentials(options.proxy)) {
-          aria2cConfig = writeTempConfigFile(
-            'yyb-apk-extractor-aria2c-',
-            buildAria2cProxyConfigText(options.proxy)
-          );
-          aria2cArgs.push('--conf-path', aria2cConfig.filePath);
-        } else {
-          aria2cArgs.push('--all-proxy', proxyUrl);
-        }
-      }
-      if (options.insecure) {
-        aria2cArgs.push('--check-certificate=false');
-      }
-      aria2cArgs.push(safeApkUrl);
-      try {
-        runToolWithInput(aria2c, aria2cArgs, '');
-      } finally {
-        if (aria2cConfig) aria2cConfig.cleanup();
-      }
-    } else {
-      const wget = findCommand(['wget']);
-      if (wget) {
-        if (options.proxy && hasProxyCredentials(options.proxy)) {
-          throw new Error('带认证的代理需要 curl 或 aria2c；wget 不接受代理密码出现在命令行');
-        }
-        if (options.proxy && /^socks5h?:\/\//i.test(options.proxy)) {
-          throw new Error('wget 对 socks5/socks5h 代理支持不稳定，请安装 curl 或使用 http:// 代理');
-        }
-        const wgetArgs = [
-          '-T', timeoutSec,
-          '-c', // 断点续传
-          '--max-redirect=0',
-          '-O', filePath,
-          `--user-agent=${ua}`,
-          `--referer=${referer}`,
-        ];
-        if (options.insecure) {
-          wgetArgs.push('--no-check-certificate');
-        }
-        wgetArgs.push(safeApkUrl);
-        runTool(wget, wgetArgs);
+    runToolWithInput(selected.command, curlArgs, curlInput);
+  } else if (selected.downloader === 'aria2c') {
+    const connections = String(options.connections || MAX_DOWNLOAD_CONNECTIONS);
+    const aria2cArgs = [
+      '-x', connections,
+      '-s', connections,
+      '--continue=true', // 断点续传
+      '--allow-overwrite=true',
+      '--auto-file-renaming=false',
+      '--timeout', timeoutSec,
+      '--connect-timeout', timeoutSec,
+      '--lowest-speed-limit=1024',
+      '-o', fileName,
+      '--dir', downloadDir,
+      '--header', `User-Agent: ${ua}`,
+      '--header', `Referer: ${referer}`,
+    ];
+    let aria2cConfig = null;
+    if (options.proxy) {
+      const { url: proxyUrl } = splitProxyAuth(options.proxy);
+      if (hasProxyCredentials(options.proxy)) {
+        aria2cConfig = writeTempConfigFile(
+          'yyb-apk-extractor-aria2c-',
+          buildAria2cProxyConfigText(options.proxy)
+        );
+        aria2cArgs.push('--conf-path', aria2cConfig.filePath);
       } else {
-        throw new Error('未找到可用的下载工具（aria2c / curl / wget），无法下载 APK');
+        aria2cArgs.push('--all-proxy', proxyUrl);
       }
     }
+    if (options.insecure) {
+      aria2cArgs.push('--check-certificate=false');
+    }
+    aria2cArgs.push(safeApkUrl);
+    try {
+      runToolWithInput(selected.command, aria2cArgs, '');
+    } finally {
+      if (aria2cConfig) aria2cConfig.cleanup();
+    }
+  } else if (selected.downloader === 'wget') {
+    if (options.proxy && hasProxyCredentials(options.proxy)) {
+      throw new Error('带认证的代理需要 curl 或 aria2c；wget 不接受代理密码出现在命令行');
+    }
+    if (options.proxy && /^socks5h?:\/\//i.test(options.proxy)) {
+      throw new Error('wget 对 socks5/socks5h 代理支持不稳定，请安装 curl 或使用 http:// 代理');
+    }
+    const wgetArgs = [
+      '-T', timeoutSec,
+      '-c', // 断点续传
+      '--max-redirect=0',
+      '-O', filePath,
+      `--user-agent=${ua}`,
+      `--referer=${referer}`,
+    ];
+    if (options.insecure) {
+      wgetArgs.push('--no-check-certificate');
+    }
+    wgetArgs.push(safeApkUrl);
+    runTool(selected.command, wgetArgs);
   }
 
   // 完整性校验：文件必须存在且非空
@@ -1225,7 +1491,7 @@ function createReadline({ inputTimeoutMs = 30000, maxInputLen = INTERACTIVE_INPU
     }
   });
 
-  const ask = (prompt) =>
+  const ask = (prompt, { timeoutMs = inputTimeoutMs } = {}) =>
     new Promise((resolve) => {
       if (closed) {
         resolve(null);
@@ -1238,26 +1504,33 @@ function createReadline({ inputTimeoutMs = 30000, maxInputLen = INTERACTIVE_INPU
         pendingResolve(typeof ans === 'string' ? ans.slice(0, maxInputLen) : '');
         clearPending();
       });
-      pendingTimer = setTimeout(() => {
-        if (!pendingResolve) return;
-        pendingResolve(null);
-        clearPending();
-      }, inputTimeoutMs);
+      if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+        pendingTimer = setTimeout(() => {
+          if (!pendingResolve) return;
+          pendingResolve(null);
+          clearPending();
+        }, timeoutMs);
+      }
     });
   return { rl, ask, isClosed: () => closed };
 }
 
-function printInteractiveHelp() {
+function printInteractiveHelp(options = {}) {
+  const downloadDir = resolveInteractiveDownloadDir(options);
   console.error(`
 可用命令：
-  search <关键词>  搜索应用
+  search / s <关键词>  搜索应用
   list / ls        列出上一次搜索结果
-  select <序号>    选中应用
-  download         下载当前选中的应用
-  get <包名或URL>  直接提取 APK 直链
-  proxy <地址>     设置/切换代理（空地址表示清除）
-  help             显示本帮助
-  exit / quit      退出交互模式
+  select / sel <序号>  选中应用
+  download / d         下载当前选中的应用（默认 ${downloadDir}）
+  download / d <序号>  直接下载搜索结果中的第 N 项
+  get / g <包名或URL>  解析 APK 并确认下载
+  <包名或URL>      直接粘贴包名或应用宝链接，解析后确认下载
+  proxy / p <地址>     设置/切换代理（空地址表示清除）
+  timeout / t [时长]   查看或调整超时时间（示例: 10s, 5000）
+  doctor / env      检查本机 Node.js 与下载工具
+  help / h / ?         显示本帮助
+  exit / quit / q      退出交互模式
 `);
 }
 
@@ -1273,6 +1546,32 @@ function printSearchResults(state) {
     const meta = [r.pkgName, r.version, r.developer, size].filter(Boolean).join(' | ');
     console.error(`${idx}. ${r.name} ${c.dim}| ${meta}${c.reset}`);
   });
+  console.error('\n可使用 select <序号> 选中，或直接输入 download <序号> 下载。');
+}
+
+function formatSearchResultsSummary(result) {
+  const lines = [`搜索结果: ${result.query} (${result.count} 条)`];
+  for (const item of result.results.slice(0, 5)) {
+    const size = item.apkSize > 0 ? formatBytes(item.apkSize) : '';
+    const meta = [item.pkgName, item.version, item.developer, size].filter(Boolean).join(' | ');
+    lines.push(`- ${item.name} | ${meta}`);
+  }
+  if (result.results.length > 5) {
+    lines.push(`... 还有 ${result.results.length - 5} 条`);
+  }
+  lines.push('可直接用 select <序号> 或 download <序号> 继续。');
+  return lines.join('\n');
+}
+
+function parseResultIndex(arg, total) {
+  if (!/^\d+$/.test(arg)) {
+    return { error: '序号必须是正整数' };
+  }
+  const idx = Number(arg) - 1;
+  if (idx < 0 || idx >= total) {
+    return { error: '序号超出范围' };
+  }
+  return { idx };
 }
 
 async function handleInteractiveSearch(arg, state, options) {
@@ -1288,54 +1587,158 @@ async function handleInteractiveSearch(arg, state, options) {
 }
 
 function handleInteractiveSelect(arg, state) {
-  if (!/^\d+$/.test(arg)) {
-    console.error('序号必须是正整数');
+  if (!state.results.length) {
+    console.error('暂无搜索结果，先输入 search <关键词>');
     return;
   }
-  const idx = Number(arg) - 1;
-  if (idx < 0 || idx >= state.results.length) {
-    console.error('序号超出范围');
+  const parsed = parseResultIndex(arg, state.results.length);
+  if (parsed.error) {
+    console.error(parsed.error);
     return;
   }
-  state.selected = state.results[idx];
+  state.selected = state.results[parsed.idx];
   console.error(`已选中: ${state.selected.name} (${state.selected.pkgName})`);
 }
 
 async function handleInteractiveDownload(arg, state, options, ask, isClosed) {
-  if (!state.selected) {
-    console.error('请先 select 一个应用');
+  if (!state.results.length && !state.selected) {
+    console.error('暂无搜索结果，先输入 search <关键词>');
     return;
   }
-  let dir = options.downloadDir;
-  if (!dir) {
-    const answerRaw = await ask('下载目录 (默认当前目录): ');
-    if (answerRaw === null || isClosed()) return 'break';
-    const answer = answerRaw.trim();
-    dir = answer || '.';
+  if (arg) {
+    const parsed = parseResultIndex(arg, state.results.length);
+    if (parsed.error) {
+      console.error(parsed.error);
+      return;
+    }
+    state.selected = state.results[parsed.idx];
+    console.error(`已选中: ${state.selected.name} (${state.selected.pkgName})`);
   }
-  validateDownloadDir(dir, '下载目录');
+  if (!state.selected) {
+    console.error('请先 select 一个应用，或使用 download <序号>');
+    return;
+  }
   state.busy = true;
+  console.error('正在提取 APK 链接，请稍候...');
   const result = await extractApkDownloadUrl(state.selected.pkgName, options);
-  const filePath = await downloadApk(result.apkUrl, result.pkgName, dir, options);
-  console.log(JSON.stringify({ ...result, downloadedFile: filePath }, null, 2));
+  const maybeDownloaded = await maybeDownloadAfterConfirm(
+    { ...result, detailUrl: state.selected.detailUrl },
+    options,
+    ask,
+    isClosed
+  );
+  if (maybeDownloaded === 'break') {
+    return 'break';
+  }
+  console.log(JSON.stringify(maybeDownloaded, null, 2));
 }
 
-async function handleInteractiveGet(arg, state, options) {
+function isYes(answer) {
+  return /^(y|yes|yeah|yep|Y|YES|ok|OK|好的|好|是|确认|下载)$/u.test(String(answer || '').trim());
+}
+
+function isNo(answer) {
+  return /^(n|no|N|NO|否|不|不要|不下载|取消|跳过|算了|cancel|CANCEL|c|C|q|Q|quit|QUIT)$/u.test(String(answer || '').trim());
+}
+
+function parseDownloadPromptAnswer(answer, defaultDir) {
+  const trimmed = String(answer || '').trim();
+  if (!trimmed || isYes(trimmed)) return { action: 'download', dir: defaultDir };
+  if (isNo(trimmed)) return { action: 'skip' };
+  return { action: 'custom-dir', dir: trimmed };
+}
+
+function parseCustomDirConfirmAnswer(answer) {
+  const trimmed = String(answer || '').trim();
+  if (!trimmed || isYes(trimmed)) return { action: 'download' };
+  if (isNo(trimmed)) return { action: 'skip' };
+  return { action: 'custom-dir', dir: trimmed };
+}
+
+function normalizeInteractiveCommand(cmd) {
+  return String(cmd || '').toLowerCase();
+}
+
+function appInfoErrorMessage(error) {
+  if (!error) return '';
+  return sanitizeTerminalOutput(error.message || String(error));
+}
+
+function pushAppField(lines, label, value) {
+  if (value === undefined || value === null || value === '') return;
+  lines.push(`${label}: ${value}`);
+}
+
+function formatAppConfirmSummary(result, appInfo, appInfoError, downloadDir) {
+  const lines = ['应用详情'];
+  if (appInfoError) {
+    pushAppField(lines, '详情状态', `获取失败: ${appInfoErrorMessage(appInfoError)}`);
+  }
+  pushAppField(lines, '名称', appInfo?.name);
+  pushAppField(lines, '包名', result.pkgName);
+  pushAppField(lines, '应用ID', appInfo?.appId);
+  pushAppField(lines, '版本', appInfo?.version);
+  pushAppField(lines, '开发者', appInfo?.developer);
+  pushAppField(lines, '大小', appInfo?.apkSize > 0 ? formatBytes(appInfo.apkSize) : '');
+  pushAppField(lines, '评分', appInfo?.rating);
+  pushAppField(lines, '简介', appInfo?.intro);
+  pushAppField(lines, '图标', appInfo?.icon);
+  pushAppField(lines, '详情页', result.detailUrl);
+  pushAppField(lines, 'APK', result.apkUrl);
+  pushAppField(lines, '下载目录', downloadDir);
+  return lines.join('\n');
+}
+
+async function resolveAppInfoForConfirm(pkgName, options) {
+  try {
+    return { appInfo: await fetchAppInfo(pkgName, options), appInfoError: null };
+  } catch (e) {
+    return { appInfo: null, appInfoError: e };
+  }
+}
+
+async function maybeDownloadAfterConfirm(result, options, ask, isClosed) {
+  const dir = options.downloadDir || DEFAULT_DOWNLOAD_DIR;
+  console.error('正在解析应用信息，请稍候...');
+  const { appInfo, appInfoError } = await resolveAppInfoForConfirm(result.pkgName, options);
+  console.error(formatAppConfirmSummary(result, appInfo, appInfoError, dir));
+  const answerRaw = await ask(`下载到 ${dir}? [Enter=确认下载, 输入新目录=改目录后再确认, n/q=取消]: `, { timeoutMs: 0 });
+  if (answerRaw === null || isClosed()) return 'break';
+  const output = appInfo ? { ...result, appInfo } : { ...result };
+  if (appInfoError) output.appInfoError = appInfoErrorMessage(appInfoError);
+  const decision = parseDownloadPromptAnswer(answerRaw, dir);
+  if (decision.action === 'skip') return output;
+
+  let targetDir = decision.dir;
+  if (decision.action === 'custom-dir') {
+    while (true) {
+      validateDownloadDir(targetDir, '下载目录');
+      const confirmRaw = await ask(`确认下载到 ${targetDir}? [Enter=确认下载, 新目录=改目录, n/q=取消]: `, { timeoutMs: 0 });
+      if (confirmRaw === null || isClosed()) return 'break';
+      const confirmDecision = parseCustomDirConfirmAnswer(confirmRaw);
+      if (confirmDecision.action === 'download') break;
+      if (confirmDecision.action === 'skip') return output;
+      targetDir = confirmDecision.dir;
+    }
+  }
+
+  validateDownloadDir(targetDir, '下载目录');
+  const filePath = await downloadApk(result.apkUrl, result.pkgName, targetDir, options);
+  return { ...output, downloadedFile: filePath };
+}
+
+async function handleInteractiveGet(arg, state, options, ask, isClosed) {
   if (!arg) {
     console.error('请输入包名或应用宝详情页 URL');
     return;
   }
   state.busy = true;
   const result = await extractApkDownloadUrl(arg, options);
-  if (options.downloadDir) {
-    result.downloadedFile = await downloadApk(
-      result.apkUrl,
-      result.pkgName,
-      options.downloadDir,
-      options
-    );
+  const maybeDownloaded = await maybeDownloadAfterConfirm(result, options, ask, isClosed);
+  if (maybeDownloaded === 'break') {
+    return 'break';
   }
-  console.log(JSON.stringify(result, null, 2));
+  console.log(JSON.stringify(maybeDownloaded, null, 2));
 }
 
 function handleInteractiveProxy(arg, options) {
@@ -1349,6 +1752,19 @@ function handleInteractiveProxy(arg, options) {
   console.error(`代理已设置为: ${options.proxy ? maskUrl(options.proxy) : '无'}`);
 }
 
+function handleInteractiveTimeout(arg, options) {
+  if (!arg) {
+    console.error(`当前超时: ${options.timeout}ms`);
+    return;
+  }
+  options.timeout = parseTimeoutMs(arg, 'timeout');
+  console.error(`超时已设置为: ${options.timeout}ms`);
+}
+
+function handleInteractiveDoctor() {
+  console.error(formatDoctorSummary(collectDoctorInfo()));
+}
+
 async function runInteractive(options) {
   if (!process.stdin.isTTY) {
     throw new Error('交互模式需要在 TTY 终端中运行');
@@ -1358,9 +1774,9 @@ async function runInteractive(options) {
   const state = { results: [], selected: null, busy: false, exiting: false };
 
   const commandMap = {
-    help: printInteractiveHelp,
-    h: printInteractiveHelp,
-    '?': printInteractiveHelp,
+    help: () => printInteractiveHelp(options),
+    h: () => printInteractiveHelp(options),
+    '?': () => printInteractiveHelp(options),
     search: handleInteractiveSearch,
     s: handleInteractiveSearch,
     list: () => printSearchResults(state),
@@ -1369,24 +1785,29 @@ async function runInteractive(options) {
     sel: handleInteractiveSelect,
     download: (arg) => handleInteractiveDownload(arg, state, options, ask, isClosed),
     d: (arg) => handleInteractiveDownload(arg, state, options, ask, isClosed),
-    get: (arg) => handleInteractiveGet(arg, state, options),
-    g: (arg) => handleInteractiveGet(arg, state, options),
+    get: (arg) => handleInteractiveGet(arg, state, options, ask, isClosed),
+    g: (arg) => handleInteractiveGet(arg, state, options, ask, isClosed),
     proxy: (arg) => handleInteractiveProxy(arg, options),
     p: (arg) => handleInteractiveProxy(arg, options),
+    timeout: (arg) => handleInteractiveTimeout(arg, options),
+    t: (arg) => handleInteractiveTimeout(arg, options),
+    doctor: handleInteractiveDoctor,
+    env: handleInteractiveDoctor,
   };
 
   try {
     console.error(`${c.bold}${c.cyan}yyb-apk-extractor 交互模式${c.reset} ${c.dim}v${VERSION}${c.reset}\n`);
-    printInteractiveHelp();
+    printInteractiveHelp(options);
 
     while (!state.exiting) {
-      const raw = await ask('yyb> ');
+      const raw = await ask('yyb> ', { timeoutMs: 0 });
       if (raw === null || isClosed()) {
         break;
       }
       const line = typeof raw === 'string' ? raw.trim() : '';
       if (!line) continue;
-      const [cmd, ...rest] = line.split(/\s+/);
+      const [cmdRaw, ...rest] = line.split(/\s+/);
+      const cmd = normalizeInteractiveCommand(cmdRaw);
       const arg = rest.join(' ');
 
       try {
@@ -1400,6 +1821,11 @@ async function runInteractive(options) {
         }
         const handler = commandMap[cmd];
         if (!handler) {
+          if (isDirectAppInput(line)) {
+            const directResult = await handleInteractiveGet(line, state, options, ask, isClosed);
+            if (directResult === 'break') break;
+            continue;
+          }
           console.error('未知命令，输入 help 查看帮助');
           continue;
         }
@@ -1428,16 +1854,25 @@ async function main() {
 
   if (mode === 'search') {
     const result = await searchApps(keyword, options);
+    if (process.stdout.isTTY || process.stderr.isTTY) {
+      console.error(formatSearchResultsSummary(result));
+    }
     console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
+  if (mode === 'doctor') {
+    console.log(JSON.stringify(collectDoctorInfo(), null, 2));
     return;
   }
 
   // 原有直接提取模式
   const result = await extractApkDownloadUrl(pkgNameOrUrl, options);
+  const downloadDir = resolveDirectDownloadDir(pkgNameOrUrl, options);
 
-  if (options.downloadDir) {
+  if (downloadDir) {
     const filePath = await retryAsync(
-      () => downloadApk(result.apkUrl, result.pkgName, options.downloadDir, options),
+      () => downloadApk(result.apkUrl, result.pkgName, downloadDir, options),
       2,
       3000
     );
@@ -1470,32 +1905,58 @@ module.exports = {
   assertAllowedHttpUrl,
   assertAllowedHostname,
   buildSpawnOptions,
+  collectDoctorInfo,
   createChildEnv,
   cleanupTempFiles,
   buildAria2cProxyConfigText,
   buildCurlProxyConfigInput,
   createReadline,
   extractApkDownloadUrl,
+  escapeRegExp,
+  fetchAppInfo,
   fetchHtmlWithCurl,
   fetchHtmlWithNode,
+  findAppInfoFromHtml,
+  formatDoctorSummary,
+  getDownloadOrder,
+  downloadApk,
+  formatAppConfirmSummary,
   formatBytes,
   getPkgName,
   hasProxyCredentials,
   isAria2cProxySupported,
+  isDirectAppInput,
+  isHttpUrl,
   isValidPkgName,
   maskUrl,
   normalizeUrl,
+  normalizeInteractiveCommand,
+  parseAppEntriesFromHtml,
   parseApkUrlFromHtml,
   parseArgs,
   parseCurlHeaders,
+  parseCustomDirConfirmAnswer,
+  parseConnections,
+  parseDownloadPromptAnswer,
+  parseDownloader,
+  parseResultIndex,
   parseSearchResultsFromHtml,
+  parseTimeoutMs,
   resolveDownloadRedirects,
+  resolveDirectDownloadDir,
+  resolveInteractiveDownloadDir,
+  sanitizeDownloadFileName,
+  selectDownloader,
+  dedupeAppEntries,
+  formatSearchResultsSummary,
+  handleInteractiveTimeout,
   runInteractive,
   safeTencentUrl,
   sanitizeTerminalOutput,
   sanitizeProcessOutput,
   searchApps,
   splitProxyAuth,
+  timeoutSeconds,
   validateDownloadDir,
   validateProxy,
   validateSearchKeyword,
