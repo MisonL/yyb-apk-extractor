@@ -74,6 +74,8 @@ const MAX_DOWNLOAD_CONNECTIONS = 16;
 const DOWNLOADERS = ['auto', 'curl', 'aria2c', 'wget'];
 const ALLOWED_SEARCH_HOSTNAMES = ['sj.qq.com'];
 const DEFAULT_DOWNLOAD_DIR = './downloads';
+const COMMAND_DETECT_TIMEOUT_MS = 5000;
+const CHILD_OUTPUT_MAX_BUFFER = 4 * 1024 * 1024;
 
 // 终端颜色支持：非 TTY 或设置 NO_COLOR/--no-color 时禁用，保证管道输出干净
 const noColorFlag = process.argv.includes('--no-color');
@@ -484,8 +486,8 @@ function splitProxyAuth(proxyUrl) {
   if (!proxyUrl) return { url: '', username: '', password: '' };
   try {
     const u = new URL(proxyUrl);
-    const username = u.username;
-    const password = u.password;
+    const username = safeDecodeURIComponent(u.username);
+    const password = safeDecodeURIComponent(u.password);
     u.username = '';
     u.password = '';
     return { url: u.toString(), username, password };
@@ -494,19 +496,37 @@ function splitProxyAuth(proxyUrl) {
   }
 }
 
+function safeDecodeURIComponent(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
 function hasProxyCredentials(proxyUrl) {
   const { username, password } = splitProxyAuth(proxyUrl);
   return Boolean(username || password);
 }
 
+function buildProxyUrlWithDecodedAuth(proxyUrl) {
+  if (!proxyUrl) return '';
+  const { url, username, password } = splitProxyAuth(proxyUrl);
+  if (!username && !password) return url;
+  const u = new URL(url);
+  u.username = username;
+  u.password = password;
+  return u.toString();
+}
+
 function buildCurlProxyConfigInput(proxyUrl) {
   if (!proxyUrl) return '';
-  return `proxy = ${JSON.stringify(proxyUrl)}\n`;
+  return `proxy = ${JSON.stringify(buildProxyUrlWithDecodedAuth(proxyUrl))}\n`;
 }
 
 function buildAria2cProxyConfigText(proxyUrl) {
   if (!proxyUrl) return '';
-  return `all-proxy=${proxyUrl}\n`;
+  return `all-proxy=${buildProxyUrlWithDecodedAuth(proxyUrl)}\n`;
 }
 
 function sanitizeProcessOutput(value) {
@@ -597,12 +617,13 @@ function createChildEnv(options = {}) {
 
 function buildSpawnOptions({ env, stdio, input }) {
   const shouldPipeInput = input !== undefined && input !== null && input !== '';
+  const outputStdio = stdio === 'inherit' ? 'inherit' : 'pipe';
   const spawnOptions = {
     env,
     stdio: shouldPipeInput
-      ? ['pipe', stdio === 'inherit' ? 'inherit' : 'pipe', stdio === 'inherit' ? 'inherit' : 'pipe']
-      : stdio,
-    maxBuffer: 100 * 1024 * 1024,
+      ? ['pipe', outputStdio, outputStdio]
+      : outputStdio,
+    maxBuffer: CHILD_OUTPUT_MAX_BUFFER,
   };
   if (shouldPipeInput) {
     spawnOptions.input = input;
@@ -736,7 +757,10 @@ function findCommand(names) {
   for (const name of names) {
     try {
       // 直接在 PATH 中执行 --version，成功退出视为可用
-      const res = spawnSync(name, ['--version'], { stdio: 'ignore' });
+      const res = spawnSync(name, ['--version'], {
+        stdio: 'ignore',
+        timeout: COMMAND_DETECT_TIMEOUT_MS,
+      });
       if (res.status === 0) {
         commandCache.set(key, name);
         return name;
@@ -819,6 +843,9 @@ function buildAria2cDownloadArgs({
     '--header', `User-Agent: ${ua}`,
     '--header', `Referer: ${referer}`,
   ];
+  if (!options.verbose) {
+    args.push('--summary-interval=0', '--console-log-level=warn');
+  }
   if (options.proxy) {
     const { url: proxyUrl } = splitProxyAuth(options.proxy);
     if (hasProxyCredentials(options.proxy)) {
@@ -831,6 +858,64 @@ function buildAria2cDownloadArgs({
   if (options.insecure) {
     args.push('--check-certificate=false');
   }
+  args.push(safeApkUrl);
+  return args;
+}
+
+function buildCurlDownloadArgs({
+  filePath,
+  safeApkUrl,
+  timeoutSec,
+  ua,
+  referer,
+  options = {},
+}) {
+  const args = [
+    '--fail',
+    '--connect-timeout', timeoutSec,
+    '--speed-time', timeoutSec,
+    '--speed-limit', '1024',
+    '-C', '-',
+    '-o', filePath,
+    '-H', `User-Agent: ${ua}`,
+    '-H', `Referer: ${referer}`,
+  ];
+  if (!options.verbose) {
+    args.push('--silent', '--show-error');
+  }
+  let input = '';
+  if (options.proxy) {
+    const { url: proxyUrl } = splitProxyAuth(options.proxy);
+    if (hasProxyCredentials(options.proxy)) {
+      args.push('-K', '-');
+      input = buildCurlProxyConfigInput(options.proxy);
+    } else {
+      args.push('--proxy', proxyUrl);
+    }
+  }
+  if (options.insecure) args.push('--insecure');
+  args.push(safeApkUrl);
+  return { args, input };
+}
+
+function buildWgetDownloadArgs({
+  filePath,
+  safeApkUrl,
+  timeoutSec,
+  ua,
+  referer,
+  options = {},
+}) {
+  const args = [
+    '-T', timeoutSec,
+    '-c',
+    '--no-verbose',
+    '--max-redirect=5',
+    '-O', filePath,
+    `--user-agent=${ua}`,
+    `--referer=${referer}`,
+  ];
+  if (options.insecure) args.push('--no-check-certificate');
   args.push(safeApkUrl);
   return args;
 }
@@ -1127,7 +1212,7 @@ function sanitizeDownloadFileName(name, fallbackName) {
 
   const ext = path.extname(fileName);
   const base = ext ? fileName.slice(0, -ext.length) : fileName;
-  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i.test(base)) {
+  if (/^(con|prn|aux|nul|clock\$|com[0-9]|lpt[0-9])$/i.test(base)) {
     fileName = `_${fileName}`;
   }
 
@@ -1166,6 +1251,9 @@ function resolveDownloadRedirects(url, options, redirectCount = 0) {
     } else {
       args.push('-x', proxyUrl);
     }
+  }
+  if (options.insecure) {
+    args.push('--insecure');
   }
   args.push(safeUrl);
 
@@ -1394,31 +1482,15 @@ async function downloadApk(apkUrl, pkgName, downloadDir, options = {}) {
   }
 
   if (selected.downloader === 'curl') {
-    const curlArgs = [
-      '--fail',
-      '--connect-timeout', timeoutSec, // 连接建立超时
-      '--speed-time', timeoutSec,       // 若平均速度低于 speed-limit 持续该时长则中断
-      '--speed-limit', '1024',          // 1KB/s，检测是否基本断流
-      '-C', '-',                        // 断点续传
-      '-o', filePath,
-      '-H', `User-Agent: ${ua}`,
-      '-H', `Referer: ${referer}`,
-    ];
-    let curlInput = '';
-    if (options.proxy) {
-      const { url: proxyUrl } = splitProxyAuth(options.proxy);
-      if (hasProxyCredentials(options.proxy)) {
-        curlArgs.push('-K', '-');
-        curlInput = buildCurlProxyConfigInput(options.proxy);
-      } else {
-        curlArgs.push('--proxy', proxyUrl);
-      }
-    }
-    if (options.insecure) {
-      curlArgs.push('--insecure');
-    }
-    curlArgs.push(safeApkUrl);
-    runToolWithInput(selected.command, curlArgs, curlInput);
+    const { args, input } = buildCurlDownloadArgs({
+      filePath,
+      safeApkUrl,
+      timeoutSec,
+      ua,
+      referer,
+      options,
+    });
+    runToolWithInput(selected.command, args, input);
   } else if (selected.downloader === 'aria2c') {
     let aria2cConfig = null;
     if (options.proxy) {
@@ -1451,19 +1523,15 @@ async function downloadApk(apkUrl, pkgName, downloadDir, options = {}) {
     if (options.proxy && /^socks5h?:\/\//i.test(options.proxy)) {
       throw new Error('wget 对 socks5/socks5h 代理支持不稳定，请安装 curl 或使用 http:// 代理');
     }
-    const wgetArgs = [
-      '-T', timeoutSec,
-      '-c', // 断点续传
-      '--max-redirect=0',
-      '-O', filePath,
-      `--user-agent=${ua}`,
-      `--referer=${referer}`,
-    ];
-    if (options.insecure) {
-      wgetArgs.push('--no-check-certificate');
-    }
-    wgetArgs.push(safeApkUrl);
-    runTool(selected.command, wgetArgs);
+    const args = buildWgetDownloadArgs({
+      filePath,
+      safeApkUrl,
+      timeoutSec,
+      ua,
+      referer,
+      options,
+    });
+    runTool(selected.command, args);
   }
 
   // 完整性校验：文件必须存在且非空
@@ -1740,7 +1808,17 @@ async function maybeDownloadAfterConfirm(result, options, ask, isClosed) {
   let targetDir = decision.dir;
   if (decision.action === 'custom-dir') {
     while (true) {
-      validateDownloadDir(targetDir, '下载目录');
+      try {
+        validateDownloadDir(targetDir, '下载目录');
+      } catch (e) {
+        console.error(`${c.red}[error]${c.reset} ${e.message}`);
+        const retryRaw = await ask('请重新输入下载目录，或输入 n/q 取消: ', { timeoutMs: 0 });
+        if (retryRaw === null || isClosed()) return 'break';
+        const retryDecision = parseCustomDirConfirmAnswer(retryRaw);
+        if (retryDecision.action === 'skip') return output;
+        targetDir = retryDecision.action === 'download' ? dir : retryDecision.dir;
+        continue;
+      }
       const confirmRaw = await ask(`确认下载到 ${targetDir}? [Enter=确认下载, 新目录=改目录, n/q=取消]: `, { timeoutMs: 0 });
       if (confirmRaw === null || isClosed()) return 'break';
       const confirmDecision = parseCustomDirConfirmAnswer(confirmRaw);
@@ -1933,6 +2011,8 @@ module.exports = {
   assertAllowedHttpUrl,
   assertAllowedHostname,
   buildAria2cDownloadArgs,
+  buildCurlDownloadArgs,
+  buildWgetDownloadArgs,
   buildSpawnOptions,
   collectDoctorInfo,
   createChildEnv,
@@ -1958,6 +2038,7 @@ module.exports = {
   isHttpUrl,
   isValidPkgName,
   maskUrl,
+  maybeDownloadAfterConfirm,
   normalizeUrl,
   normalizeInteractiveCommand,
   parseAppEntriesFromHtml,

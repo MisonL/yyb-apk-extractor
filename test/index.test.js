@@ -6,8 +6,10 @@ const path = require('path');
 const {
   buildAria2cDownloadArgs,
   buildAria2cProxyConfigText,
+  buildCurlDownloadArgs,
   buildCurlProxyConfigInput,
   buildSpawnOptions,
+  buildWgetDownloadArgs,
   collectDoctorInfo,
   cleanupTempFiles,
   createChildEnv,
@@ -37,6 +39,7 @@ const {
   parseAppEntriesFromHtml,
   dedupeAppEntries,
   formatSearchResultsSummary,
+  maybeDownloadAfterConfirm,
   parseSearchResultsFromHtml,
   parseArgs,
   resolveDirectDownloadDir,
@@ -187,6 +190,8 @@ test('根目录拒绝', () => {
 test('下载文件名兼容 Windows 非法字符和保留名', () => {
   assert.strictEqual(sanitizeDownloadFileName('../a<b>:c?.apk', 'fallback.apk'), 'a_b__c_.apk');
   assert.strictEqual(sanitizeDownloadFileName('CON.apk', 'fallback.apk'), '_CON.apk');
+  assert.strictEqual(sanitizeDownloadFileName('COM0.apk', 'fallback.apk'), '_COM0.apk');
+  assert.strictEqual(sanitizeDownloadFileName('CLOCK$.apk', 'fallback.apk'), '_CLOCK$.apk');
   assert.strictEqual(sanitizeDownloadFileName('bad name. ', 'fallback.apk'), 'bad name');
   assert.strictEqual(sanitizeDownloadFileName('', 'fallback.apk'), 'fallback.apk');
 });
@@ -404,6 +409,27 @@ test('交互模式默认下载目录可被 --download-dir 覆盖', () => {
   assert.strictEqual(resolveInteractiveDownloadDir({}), './downloads');
   assert.strictEqual(resolveInteractiveDownloadDir({ downloadDir: './apk' }), './apk');
 });
+test('交互下载目录非法时留在当前确认流程并允许取消', async () => {
+  const prompts = [];
+  const answers = ['../bad', 'n'];
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    const result = await maybeDownloadAfterConfirm(
+      { pkgName: 'com.example.app', apkUrl: 'http://imtt.dd.qq.com/app.apk' },
+      { downloadDir: './downloads', timeout: 1, ignoreProxyEnv: true },
+      async (prompt) => {
+        prompts.push(prompt);
+        return answers.shift();
+      },
+      () => false
+    );
+    assert.strictEqual(result.pkgName, 'com.example.app');
+    assert.ok(prompts.some((prompt) => prompt.includes('请重新输入下载目录')));
+  } finally {
+    console.error = originalError;
+  }
+});
 
 section('\n=== 参数解析 ===');
 test('直接模式解析包名', () => {
@@ -559,6 +585,45 @@ test('doctor 环境检查返回工具状态与提示', () => {
 });
 
 section('\n=== 下载器执行 ===');
+test('curl 下载参数支持认证代理、证书降级和断点续传', () => {
+  const { args, input } = buildCurlDownloadArgs({
+    filePath: '/tmp/app.apk',
+    safeApkUrl: 'http://imtt.dd.qq.com/app.apk',
+    timeoutSec: '30',
+    ua: 'test-ua',
+    referer: 'https://a.app.qq.com/',
+    options: {
+      proxy: 'http://user:p%40ss%3Aword@127.0.0.1:7890',
+      insecure: true,
+    },
+  });
+  assert.ok(args.includes('--fail'));
+  assert.strictEqual(args[args.indexOf('--connect-timeout') + 1], '30');
+  assert.ok(args.includes('-C'));
+  assert.ok(args.includes('-K'));
+  assert.ok(args.includes('--silent'));
+  assert.ok(args.includes('--show-error'));
+  assert.ok(args.includes('--insecure'));
+  assert.strictEqual(args[args.length - 1], 'http://imtt.dd.qq.com/app.apk');
+  assert.ok(input.includes('p%40ss%3Aword'));
+  assert.ok(!input.includes('p%2540ss%253Aword'));
+});
+test('wget 下载参数允许有限重定向并支持证书降级', () => {
+  const args = buildWgetDownloadArgs({
+    filePath: '/tmp/app.apk',
+    safeApkUrl: 'http://imtt.dd.qq.com/app.apk',
+    timeoutSec: '30',
+    ua: 'test-ua',
+    referer: 'https://a.app.qq.com/',
+    options: { insecure: true },
+  });
+  assert.strictEqual(args[args.indexOf('-T') + 1], '30');
+  assert.ok(args.includes('-c'));
+  assert.ok(args.includes('--no-verbose'));
+  assert.ok(args.includes('--max-redirect=5'));
+  assert.ok(args.includes('--no-check-certificate'));
+  assert.strictEqual(args[args.length - 1], 'http://imtt.dd.qq.com/app.apk');
+});
 test('aria2c 参数构造包含多连接、超时、请求头与净化文件名', () => {
   const args = buildAria2cDownloadArgs({
     fileName: sanitizeDownloadFileName('CON:bad?.apk', 'com.example.app.apk'),
@@ -582,6 +647,8 @@ test('aria2c 参数构造包含多连接、超时、请求头与净化文件名'
   assert.ok(args.includes('--header'));
   assert.ok(args.includes('User-Agent: test-ua'));
   assert.ok(args.includes('Referer: https://a.app.qq.com/'));
+  assert.ok(args.includes('--summary-interval=0'));
+  assert.ok(args.includes('--console-log-level=warn'));
   assert.ok(args.includes('--check-certificate=false'));
   assert.strictEqual(args[args.length - 1], 'http://imtt.dd.qq.com/sjy.00022/app.apk');
 });
@@ -664,6 +731,12 @@ test('splitProxyAuth 剥离凭据', () => {
   assert.strictEqual(result.username, 'user');
   assert.strictEqual(result.password, 'pass');
 });
+test('splitProxyAuth 解码 URL 编码的代理凭据', () => {
+  const result = splitProxyAuth('http://u%40ser:p%40ss%3Aword@127.0.0.1:7890');
+  assert.strictEqual(result.url, 'http://127.0.0.1:7890/');
+  assert.strictEqual(result.username, 'u@ser');
+  assert.strictEqual(result.password, 'p@ss:word');
+});
 test('splitProxyAuth 无凭据代理返回空凭据', () => {
   const result = splitProxyAuth('http://127.0.0.1:7890');
   assert.strictEqual(result.url, 'http://127.0.0.1:7890/');
@@ -740,13 +813,23 @@ test('带 stdin 的 verbose 下载命令仍继承 stdout/stderr', () => {
   assert.deepStrictEqual(options.stdio, ['pipe', 'inherit', 'inherit']);
   assert.ok(options.input.includes('secret'));
 });
-test('带 stdin 的非 verbose 下载命令保持输出可捕获', () => {
+test('带 stdin 的非 verbose 下载命令保留错误输出并限制缓冲', () => {
   const options = buildSpawnOptions({
     env: {},
     stdio: 'pipe',
     input: 'proxy = "http://user:secret@127.0.0.1:7890/"\n',
   });
   assert.deepStrictEqual(options.stdio, ['pipe', 'pipe', 'pipe']);
+  assert.ok(options.maxBuffer <= 4 * 1024 * 1024);
+});
+test('非 verbose 下载命令保留错误输出并限制缓冲', () => {
+  const options = buildSpawnOptions({
+    env: {},
+    stdio: 'pipe',
+    input: '',
+  });
+  assert.strictEqual(options.stdio, 'pipe');
+  assert.ok(options.maxBuffer <= 4 * 1024 * 1024);
 });
 test('临时配置文件清理可删除凭据文件且可重复调用', () => {
   const tempConfig = writeTempConfigFile(
