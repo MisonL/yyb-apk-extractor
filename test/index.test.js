@@ -4,6 +4,7 @@ const path = require('path');
 
 // 加载被测模块（不触发 CLI 主流程）
 const {
+  buildAria2cDownloadArgs,
   buildAria2cProxyConfigText,
   buildCurlProxyConfigInput,
   buildSpawnOptions,
@@ -558,7 +559,34 @@ test('doctor 环境检查返回工具状态与提示', () => {
 });
 
 section('\n=== 下载器执行 ===');
+test('aria2c 参数构造包含多连接、超时、请求头与净化文件名', () => {
+  const args = buildAria2cDownloadArgs({
+    fileName: sanitizeDownloadFileName('CON:bad?.apk', 'com.example.app.apk'),
+    downloadDir: '/tmp/downloads',
+    safeApkUrl: 'http://imtt.dd.qq.com/sjy.00022/app.apk',
+    timeoutSec: '30',
+    ua: 'test-ua',
+    referer: 'https://a.app.qq.com/',
+    options: {
+      connections: 4,
+      proxy: '',
+      insecure: true,
+    },
+  });
+  assert.strictEqual(args[args.indexOf('-x') + 1], '4');
+  assert.strictEqual(args[args.indexOf('-s') + 1], '4');
+  assert.strictEqual(args[args.indexOf('--timeout') + 1], '30');
+  assert.strictEqual(args[args.indexOf('--connect-timeout') + 1], '30');
+  assert.strictEqual(args[args.indexOf('-o') + 1], 'CON_bad_.apk');
+  assert.strictEqual(args[args.indexOf('--dir') + 1], '/tmp/downloads');
+  assert.ok(args.includes('--header'));
+  assert.ok(args.includes('User-Agent: test-ua'));
+  assert.ok(args.includes('Referer: https://a.app.qq.com/'));
+  assert.ok(args.includes('--check-certificate=false'));
+  assert.strictEqual(args[args.length - 1], 'http://imtt.dd.qq.com/sjy.00022/app.apk');
+});
 test('aria2c 下载参数可用 fake 命令验证且文件名已净化', async () => {
+  if (process.platform === 'win32') return;
   const oldPath = process.env.PATH;
   const binDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'yyb-fake-bin-'));
   const downloadDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'yyb-download-test-'));

@@ -794,6 +794,47 @@ function formatDoctorSummary(info) {
   return lines.join('\n');
 }
 
+function buildAria2cDownloadArgs({
+  fileName,
+  downloadDir,
+  safeApkUrl,
+  timeoutSec,
+  ua,
+  referer,
+  options = {},
+  proxyConfigPath = '',
+}) {
+  const connections = String(options.connections || MAX_DOWNLOAD_CONNECTIONS);
+  const args = [
+    '-x', connections,
+    '-s', connections,
+    '--continue=true',
+    '--allow-overwrite=true',
+    '--auto-file-renaming=false',
+    '--timeout', timeoutSec,
+    '--connect-timeout', timeoutSec,
+    '--lowest-speed-limit=1024',
+    '-o', fileName,
+    '--dir', downloadDir,
+    '--header', `User-Agent: ${ua}`,
+    '--header', `Referer: ${referer}`,
+  ];
+  if (options.proxy) {
+    const { url: proxyUrl } = splitProxyAuth(options.proxy);
+    if (hasProxyCredentials(options.proxy)) {
+      if (!proxyConfigPath) throw new Error('aria2c 认证代理缺少临时配置文件');
+      args.push('--conf-path', proxyConfigPath);
+    } else {
+      args.push('--all-proxy', proxyUrl);
+    }
+  }
+  if (options.insecure) {
+    args.push('--check-certificate=false');
+  }
+  args.push(safeApkUrl);
+  return args;
+}
+
 function assertAllowedHostname(hostname, context) {
   const h = hostname.toLowerCase();
   if (!h.endsWith('.qq.com') && h !== 'qq.com') {
@@ -1379,38 +1420,25 @@ async function downloadApk(apkUrl, pkgName, downloadDir, options = {}) {
     curlArgs.push(safeApkUrl);
     runToolWithInput(selected.command, curlArgs, curlInput);
   } else if (selected.downloader === 'aria2c') {
-    const connections = String(options.connections || MAX_DOWNLOAD_CONNECTIONS);
-    const aria2cArgs = [
-      '-x', connections,
-      '-s', connections,
-      '--continue=true', // 断点续传
-      '--allow-overwrite=true',
-      '--auto-file-renaming=false',
-      '--timeout', timeoutSec,
-      '--connect-timeout', timeoutSec,
-      '--lowest-speed-limit=1024',
-      '-o', fileName,
-      '--dir', downloadDir,
-      '--header', `User-Agent: ${ua}`,
-      '--header', `Referer: ${referer}`,
-    ];
     let aria2cConfig = null;
     if (options.proxy) {
-      const { url: proxyUrl } = splitProxyAuth(options.proxy);
       if (hasProxyCredentials(options.proxy)) {
         aria2cConfig = writeTempConfigFile(
           'yyb-apk-extractor-aria2c-',
           buildAria2cProxyConfigText(options.proxy)
         );
-        aria2cArgs.push('--conf-path', aria2cConfig.filePath);
-      } else {
-        aria2cArgs.push('--all-proxy', proxyUrl);
       }
     }
-    if (options.insecure) {
-      aria2cArgs.push('--check-certificate=false');
-    }
-    aria2cArgs.push(safeApkUrl);
+    const aria2cArgs = buildAria2cDownloadArgs({
+      fileName,
+      downloadDir,
+      safeApkUrl,
+      timeoutSec,
+      ua,
+      referer,
+      options,
+      proxyConfigPath: aria2cConfig ? aria2cConfig.filePath : '',
+    });
     try {
       runToolWithInput(selected.command, aria2cArgs, '');
     } finally {
@@ -1904,6 +1932,7 @@ if (require.main === module) {
 module.exports = {
   assertAllowedHttpUrl,
   assertAllowedHostname,
+  buildAria2cDownloadArgs,
   buildSpawnOptions,
   collectDoctorInfo,
   createChildEnv,
