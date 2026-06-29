@@ -73,6 +73,10 @@ const MAX_KEYWORD_LEN = 100;
 const MAX_DOWNLOAD_CONNECTIONS = 16;
 const DOWNLOADERS = ['auto', 'curl', 'aria2c', 'wget'];
 const ALLOWED_SEARCH_HOSTNAMES = ['sj.qq.com'];
+
+function clearCommandCache() {
+  commandCache.clear();
+}
 const DEFAULT_DOWNLOAD_DIR = './downloads';
 const COMMAND_DETECT_TIMEOUT_MS = 5000;
 const CHILD_OUTPUT_MAX_BUFFER = 4 * 1024 * 1024;
@@ -2108,6 +2112,7 @@ module.exports = {
   buildWgetDownloadArgs,
   buildCommandInvocation,
   buildSpawnOptions,
+  clearCommandCache,
   collectDoctorInfo,
   createColors,
   createChildEnv,
