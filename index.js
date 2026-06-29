@@ -692,6 +692,7 @@ function buildCommandInvocation(command, args, platform = process.platform) {
   return {
     command: process.env.ComSpec || 'cmd.exe',
     args: ['/d', '/s', '/c', commandLine],
+    spawnOptions: { windowsVerbatimArguments: true },
   };
 }
 
@@ -832,10 +833,11 @@ function findCommand(names) {
           return command;
         }
         // 直接在 PATH 中执行 --version，成功退出视为可用
-        const { command: exe, args } = buildCommandInvocation(command, ['--version']);
+        const { command: exe, args, spawnOptions = {} } = buildCommandInvocation(command, ['--version']);
         const res = spawnSync(exe, args, {
           stdio: 'ignore',
           timeout: COMMAND_DETECT_TIMEOUT_MS,
+          ...spawnOptions,
         });
         if (res.status === 0) {
           commandCache.set(key, command);
@@ -1601,7 +1603,10 @@ async function downloadApk(apkUrl, pkgName, downloadDir, options = {}) {
     log(options, `执行下载命令: ${exe} ${logArgs.join(' ')}`);
     const spawnOptions = buildSpawnOptions({ env: proxyEnv, stdio, input });
     const invocation = buildCommandInvocation(exe, args);
-    const result = spawnSync(invocation.command, invocation.args, spawnOptions);
+    const result = spawnSync(invocation.command, invocation.args, {
+      ...spawnOptions,
+      ...(invocation.spawnOptions || {}),
+    });
     if (result.error) throw result.error;
     if (result.status !== 0) {
       const stderr = sanitizeProcessOutput(result.stderr);
