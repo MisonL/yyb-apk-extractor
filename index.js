@@ -1621,10 +1621,7 @@ async function downloadApk(apkUrl, pkgName, downloadDir, options = {}) {
       }
     }
     log(options, `执行下载命令: ${exe} ${logArgs.join(' ')}`);
-    const spawnOptions = {
-      ...buildSpawnOptions({ env: proxyEnv, stdio, input }),
-      timeout: options.timeout || 30000,
-    };
+    const spawnOptions = buildSpawnOptions({ env: proxyEnv, stdio, input });
     const invocation = buildCommandInvocation(exe, args);
     const result = spawnSync(invocation.command, invocation.args, mergeInvocationSpawnOptions(spawnOptions, invocation));
     if (result.error) throw result.error;
