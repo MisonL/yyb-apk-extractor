@@ -21,6 +21,7 @@ const {
   getCurlOutputTarget,
   getDownloadOrder,
   getSupportedSignals,
+  isExistingWindowsExecutableCandidate,
   isValidPkgName,
   isDirectAppInput,
   findAppInfoFromHtml,
@@ -632,6 +633,17 @@ test('Windows .cmd 下载工具通过 cmd.exe 受控执行', () => {
   } finally {
     if (oldComSpec === undefined) delete process.env.ComSpec;
     else process.env.ComSpec = oldComSpec;
+  }
+});
+test('Windows 已存在命令候选可直接识别', () => {
+  const tempDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'yyb-win-candidate-'));
+  const candidate = path.join(tempDir, 'aria2c.cmd');
+  fs.writeFileSync(candidate, '@echo off\r\nexit /b 0\r\n');
+  try {
+    assert.strictEqual(isExistingWindowsExecutableCandidate(candidate, 'win32'), true);
+    assert.strictEqual(isExistingWindowsExecutableCandidate(candidate, 'darwin'), false);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
   }
 });
 

@@ -695,6 +695,12 @@ function buildCommandInvocation(command, args, platform = process.platform) {
   };
 }
 
+function isExistingWindowsExecutableCandidate(commandPath, platform = process.platform) {
+  if (platform !== 'win32') return false;
+  if (!/\.(?:com|exe|bat|cmd)$/i.test(commandPath)) return false;
+  return fs.existsSync(commandPath);
+}
+
 function assertAllowedHttpUrl(value, label) {
   let parsed;
   try {
@@ -821,6 +827,10 @@ function findCommand(names) {
   for (const name of names) {
     for (const command of getCommandCandidates(name)) {
       try {
+        if (isExistingWindowsExecutableCandidate(command)) {
+          commandCache.set(key, command);
+          return command;
+        }
         // 直接在 PATH 中执行 --version，成功退出视为可用
         const { command: exe, args } = buildCommandInvocation(command, ['--version']);
         const res = spawnSync(exe, args, {
@@ -2138,6 +2148,7 @@ module.exports = {
   hasProxyCredentials,
   isAria2cProxySupported,
   isDirectAppInput,
+  isExistingWindowsExecutableCandidate,
   isHttpUrl,
   isValidPkgName,
   maskUrl,
