@@ -14,6 +14,7 @@ const {
   cleanupTempFiles,
   createChildEnv,
   downloadApk,
+  getCurlOutputTarget,
   getDownloadOrder,
   getSupportedSignals,
   isValidPkgName,
@@ -45,6 +46,7 @@ const {
   parseArgs,
   resolveDirectDownloadDir,
   validateProxy,
+  verifyDownloadedApkFile,
   writeTempConfigFile,
   splitProxyAuth,
   handleInteractiveTimeout,
@@ -584,6 +586,10 @@ test('doctor 环境检查返回工具状态与提示', () => {
   assert.strictEqual(result.tools.aria2c.available, false);
   assert.ok(result.notes.some((note) => note.includes('aria2c')));
 });
+test('curl 预检输出目标按平台选择', () => {
+  assert.strictEqual(getCurlOutputTarget('win32'), 'NUL');
+  assert.strictEqual(getCurlOutputTarget('darwin'), require('os').devNull);
+});
 
 section('\n=== 下载器执行 ===');
 test('curl 下载参数支持认证代理、证书降级和断点续传', () => {
@@ -726,48 +732,14 @@ test('aria2c 下载参数可用 fake 命令验证且文件名已净化', async (
   }
 });
 
-test('下载到非 APK 文件时关闭文件后再清理', async () => {
-  const oldPath = process.env.PATH;
-  const binDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'yyb-fake-bin-'));
+test('下载到非 APK 文件时关闭文件后再清理', () => {
   const downloadDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'yyb-download-bad-'));
-  const fakeCurl = path.join(binDir, 'curl');
-  fs.writeFileSync(fakeCurl, [
-    '#!/bin/sh',
-    'if [ "$1" = "--version" ]; then exit 0; fi',
-    'for arg in "$@"; do',
-    '  if [ "$arg" = "-D" ]; then printf "HTTP/1.1 200 OK\\r\\n\\r\\n"; exit 0; fi',
-    'done',
-    'out=""',
-    'while [ "$#" -gt 0 ]; do',
-    '  if [ "$1" = "-o" ]; then shift; out="$1"; fi',
-    '  shift',
-    'done',
-    'printf "<!doctype html>" > "$out"',
-  ].join('\n'), { mode: 0o755 });
-  process.env.PATH = `${binDir}${path.delimiter}${oldPath || ''}`;
-  const oldConsoleError = console.error;
-  console.error = () => {};
+  const filePath = path.join(downloadDir, 'bad.apk');
+  fs.writeFileSync(filePath, '<!doctype html>');
   try {
-    await assert.rejects(
-      () => downloadApk(
-        'http://imtt.dd.qq.com/sjy.00022/app.apk?fsname=bad.apk',
-        'com.example.app',
-        downloadDir,
-        {
-          downloader: 'curl',
-          timeout: 30000,
-          verbose: true,
-          proxy: '',
-          ignoreProxyEnv: true,
-        }
-      ),
-      /已自动清理/
-    );
-    assert.strictEqual(fs.existsSync(path.join(downloadDir, 'bad.apk')), false);
+    assert.throws(() => verifyDownloadedApkFile(filePath), /已自动清理/);
+    assert.strictEqual(fs.existsSync(filePath), false);
   } finally {
-    console.error = oldConsoleError;
-    process.env.PATH = oldPath;
-    fs.rmSync(binDir, { recursive: true, force: true });
     fs.rmSync(downloadDir, { recursive: true, force: true });
   }
 });
@@ -835,6 +807,18 @@ test('默认子进程环境变量不透传父进程代理凭据', () => {
     else process.env.HTTP_PROXY = oldHttpProxy;
     if (oldAllProxy === undefined) delete process.env.ALL_PROXY;
     else process.env.ALL_PROXY = oldAllProxy;
+  }
+});
+test('默认子进程环境变量按大小写不敏感处理代理变量', () => {
+  const oldMixedProxy = process.env.Http_Proxy;
+  process.env.Http_Proxy = 'http://user:secret@127.0.0.1:7890';
+  try {
+    const env = createChildEnv({ proxy: '', ignoreProxyEnv: false });
+    assert.strictEqual(env.Http_Proxy, 'http://127.0.0.1:7890/');
+    assert.ok(!env.Http_Proxy.includes('secret'));
+  } finally {
+    if (oldMixedProxy === undefined) delete process.env.Http_Proxy;
+    else process.env.Http_Proxy = oldMixedProxy;
   }
 });
 test('忽略代理环境变量时不传递任何代理变量', () => {

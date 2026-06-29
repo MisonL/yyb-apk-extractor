@@ -76,6 +76,7 @@ const ALLOWED_SEARCH_HOSTNAMES = ['sj.qq.com'];
 const DEFAULT_DOWNLOAD_DIR = './downloads';
 const COMMAND_DETECT_TIMEOUT_MS = 5000;
 const CHILD_OUTPUT_MAX_BUFFER = 4 * 1024 * 1024;
+const PROXY_ENV_KEY_SET = new Set(PROXY_ENV_KEYS.map((key) => key.toLowerCase()));
 
 // 终端颜色支持：非 TTY 或设置 NO_COLOR/--no-color 时禁用，保证管道输出干净
 const noColorFlag = process.argv.includes('--no-color');
@@ -538,6 +539,22 @@ function sanitizeProcessOutput(value) {
   return maskProxySecrets(text).trim();
 }
 
+function isProxyEnvKey(key) {
+  return PROXY_ENV_KEY_SET.has(String(key || '').toLowerCase());
+}
+
+function collectProxyEnvEntries(env) {
+  return Object.keys(env)
+    .filter(isProxyEnvKey)
+    .map((key) => [key, env[key]])
+    .filter(([, value]) => Boolean(value));
+}
+
+function applyPrivateMode(targetPath, mode, platform = process.platform) {
+  if (platform === 'win32') return;
+  fs.chmodSync(targetPath, mode);
+}
+
 function cleanupTempFiles() {
   for (const cleanup of Array.from(tempCleanupTasks)) {
     cleanup();
@@ -581,9 +598,9 @@ function writeTempConfigFile(prefix, content) {
   };
   try {
     tempCleanupTasks.add(cleanup);
-    fs.chmodSync(dir, 0o700);
+    applyPrivateMode(dir, 0o700);
     fs.writeFileSync(filePath, content, { encoding: 'utf8', mode: 0o600 });
-    fs.chmodSync(filePath, 0o600);
+    applyPrivateMode(filePath, 0o600);
     return {
       filePath,
       cleanup,
@@ -596,10 +613,9 @@ function writeTempConfigFile(prefix, content) {
 
 function createChildEnv(options = {}) {
   const env = { ...process.env };
-  const envProxyKeys = new Set();
-  for (const key of PROXY_ENV_KEYS) {
-    if (env[key]) envProxyKeys.add(key);
-    delete env[key];
+  const envProxyEntries = collectProxyEnvEntries(env);
+  for (const key of Object.keys(env)) {
+    if (isProxyEnvKey(key)) delete env[key];
   }
 
   if (options.ignoreProxyEnv) {
@@ -614,13 +630,17 @@ function createChildEnv(options = {}) {
     return env;
   }
 
-  for (const key of envProxyKeys) {
-    const { url: proxyWithoutAuth } = splitProxyAuth(process.env[key]);
+  for (const [key, value] of envProxyEntries) {
+    const { url: proxyWithoutAuth } = splitProxyAuth(value);
     if (proxyWithoutAuth) {
       env[key] = proxyWithoutAuth;
     }
   }
   return env;
+}
+
+function getCurlOutputTarget(platform = process.platform) {
+  return platform === 'win32' ? 'NUL' : os.devNull;
 }
 
 function buildSpawnOptions({ env, stdio, input }) {
@@ -1233,6 +1253,34 @@ function sanitizeDownloadFileName(name, fallbackName) {
   return fileName;
 }
 
+function verifyDownloadedApkFile(filePath) {
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`下载完成后未找到文件: ${filePath}`);
+  }
+  const stats = fs.statSync(filePath);
+  if (stats.size === 0) {
+    throw new Error(`下载完成但文件大小为 0: ${filePath}`);
+  }
+
+  let fd;
+  let invalidMagic = '';
+  try {
+    const magic = Buffer.alloc(4);
+    fd = fs.openSync(filePath, 'r');
+    fs.readSync(fd, magic, 0, 4, 0);
+    if (magic.toString('hex') !== '504b0304') {
+      invalidMagic = magic.toString('hex');
+    }
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+  if (invalidMagic) {
+    try { fs.unlinkSync(filePath); } catch {}
+    throw new Error(`下载的文件不是合法 APK/ZIP (魔数 ${invalidMagic} 不匹配 504b0304)，已自动清理`);
+  }
+  return stats;
+}
+
 function resolveDownloadRedirects(url, options, redirectCount = 0) {
   if (redirectCount > 5) {
     throw new Error('APK 下载重定向次数过多（>5），疑似配置错误');
@@ -1246,7 +1294,7 @@ function resolveDownloadRedirects(url, options, redirectCount = 0) {
   const args = [
     '-s',
     '-D', '-',
-    '-o', os.devNull,
+    '-o', getCurlOutputTarget(),
     '--connect-timeout', timeoutSec,
     '--max-time', timeoutSec,
     '-A', MOBILE_USER_AGENT,
@@ -1542,32 +1590,7 @@ async function downloadApk(apkUrl, pkgName, downloadDir, options = {}) {
     runTool(selected.command, args);
   }
 
-  // 完整性校验：文件必须存在且非空
-  if (!fs.existsSync(filePath)) {
-    throw new Error(`下载完成后未找到文件: ${filePath}`);
-  }
-  const stats = fs.statSync(filePath);
-  if (stats.size === 0) {
-    throw new Error(`下载完成但文件大小为 0: ${filePath}`);
-  }
-
-  // 完整性校验 2：APK 本质是 ZIP，读取前 4 字节魔数 PK\x03\x04 (504b0304)
-  let fd;
-  let invalidMagic = '';
-  try {
-    const magic = Buffer.alloc(4);
-    fd = fs.openSync(filePath, 'r');
-    fs.readSync(fd, magic, 0, 4, 0);
-    if (magic.toString('hex') !== '504b0304') {
-      invalidMagic = magic.toString('hex');
-    }
-  } finally {
-    if (fd !== undefined) fs.closeSync(fd);
-  }
-  if (invalidMagic) {
-    try { fs.unlinkSync(filePath); } catch {}
-    throw new Error(`下载的文件不是合法 APK/ZIP (魔数 ${invalidMagic} 不匹配 504b0304)，已自动清理`);
-  }
+  const stats = verifyDownloadedApkFile(filePath);
 
   if (!options.verbose) {
     console.error(`${c.green}[ok]${c.reset} ${c.bold}${fileName}${c.reset} ${c.dim}(${formatBytes(stats.size)})${c.reset}`);
@@ -2039,6 +2062,7 @@ module.exports = {
   fetchHtmlWithNode,
   findAppInfoFromHtml,
   formatDoctorSummary,
+  getCurlOutputTarget,
   getDownloadOrder,
   getSupportedSignals,
   downloadApk,
@@ -2082,6 +2106,7 @@ module.exports = {
   timeoutSeconds,
   validateDownloadDir,
   validateProxy,
+  verifyDownloadedApkFile,
   validateSearchKeyword,
   writeTempConfigFile,
 };
