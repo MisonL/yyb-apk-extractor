@@ -748,6 +748,13 @@ test('aria2c 下载参数可用 fake 命令验证且文件名已净化', async (
     process.env.Path = process.env.PATH;
   }
   process.env.YYB_ARGV_FILE = argvFile;
+  const selected = selectDownloader({ downloader: 'aria2c', proxy: '' });
+  if (process.platform === 'win32') {
+    assert.strictEqual(selected.command.toLowerCase(), fakeAria2c.toLowerCase());
+  } else {
+    assert.strictEqual(selected.command, 'aria2c');
+  }
+  clearCommandCache();
   const oldConsoleError = console.error;
   console.error = () => {};
   try {
