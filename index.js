@@ -676,14 +676,13 @@ function getCurlOutputTarget(platform = process.platform) {
   return platform === 'win32' ? 'NUL' : os.devNull;
 }
 
-function buildSpawnOptions({ env, stdio, input }) {
+function buildSpawnOptions({ env, input }) {
   const shouldPipeInput = input !== undefined && input !== null && input !== '';
-  const outputStdio = stdio === 'inherit' ? 'inherit' : 'pipe';
   const spawnOptions = {
     env,
     stdio: shouldPipeInput
-      ? ['pipe', outputStdio, outputStdio]
-      : outputStdio,
+      ? ['pipe', 'pipe', 'pipe']
+      : 'pipe',
     maxBuffer: CHILD_OUTPUT_MAX_BUFFER,
   };
   if (shouldPipeInput) {
@@ -1625,7 +1624,6 @@ async function downloadApk(apkUrl, pkgName, downloadDir, options = {}) {
   const referer = 'https://a.app.qq.com/';
 
   const proxyEnv = createChildEnv(options);
-  const stdio = 'pipe';
   const timeoutSec = timeoutSeconds(options);
 
   function runTool(exe, args) {
@@ -1651,7 +1649,7 @@ async function downloadApk(apkUrl, pkgName, downloadDir, options = {}) {
       }
     }
     log(options, `执行下载命令: ${exe} ${logArgs.join(' ')}`);
-    const spawnOptions = buildSpawnOptions({ env: proxyEnv, stdio, input });
+    const spawnOptions = buildSpawnOptions({ env: proxyEnv, input });
     const invocation = buildCommandInvocation(exe, args);
     const result = spawnSync(invocation.command, invocation.args, mergeInvocationSpawnOptions(spawnOptions, invocation));
     if (result.error) throw result.error;

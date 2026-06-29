@@ -1,6 +1,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const { spawnSync } = require('child_process');
 
 // 加载被测模块（不触发 CLI 主流程）
 const {
@@ -65,6 +66,7 @@ const {
 
 const testQueue = [];
 const apkMagic = Buffer.from('504b030400000000', 'hex');
+const cliPath = path.join(__dirname, '..', 'index.js');
 
 function section(name) {
   testQueue.push({ section: name });
@@ -72,6 +74,14 @@ function section(name) {
 
 function test(name, fn) {
   testQueue.push({ name, fn });
+}
+
+function runCli(args = [], options = {}) {
+  return spawnSync(process.execPath, [cliPath, ...args], {
+    encoding: 'utf8',
+    input: options.input,
+    env: { ...process.env, ...(options.env || {}) },
+  });
 }
 
 async function runTests() {
@@ -697,6 +707,41 @@ test('Windows 已存在命令候选可直接识别', () => {
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
+});
+
+section('\n=== CLI 集成行为 ===');
+test('CLI doctor stdout 输出纯 JSON', () => {
+  const result = runCli(['doctor', '--no-color']);
+  assert.strictEqual(result.status, 0);
+  const payload = JSON.parse(result.stdout);
+  assert.strictEqual(typeof payload.nodeVersion, 'string');
+  assert.strictEqual(typeof payload.platform, 'string');
+  assert.deepStrictEqual(result.stderr, '');
+});
+test('CLI 非 TTY 无参数不会进入交互模式', () => {
+  const result = runCli([], { input: '' });
+  assert.strictEqual(result.status, 1);
+  assert.strictEqual(result.stdout, '');
+  assert.ok(result.stderr.includes('非 TTY 终端无法进入交互模式'));
+});
+test('CLI 显式交互模式在非 TTY 下提前失败', () => {
+  const result = runCli(['--interactive'], { input: '' });
+  assert.strictEqual(result.status, 1);
+  assert.strictEqual(result.stdout, '');
+  assert.ok(result.stderr.includes('非 TTY 终端无法进入交互模式'));
+});
+test('CLI 代理错误不会泄露无协议凭据', () => {
+  const result = runCli(['doctor', '--proxy=user:secret@127.0.0.1']);
+  assert.strictEqual(result.status, 1);
+  assert.strictEqual(result.stdout, '');
+  assert.ok(result.stderr.includes('***'));
+  assert.ok(!result.stderr.includes('secret'));
+});
+test('CLI 帮助命令输出用法并成功退出', () => {
+  const result = runCli(['--help', '--no-color']);
+  assert.strictEqual(result.status, 0);
+  assert.ok(result.stdout.includes('用法:'));
+  assert.strictEqual(result.stderr, '');
 });
 
 section('\n=== 下载器执行 ===');
