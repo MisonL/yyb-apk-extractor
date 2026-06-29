@@ -717,6 +717,7 @@ test('aria2c 参数构造包含多连接、超时、请求头与净化文件名'
 test('aria2c 下载参数可用 fake 命令验证且文件名已净化', async () => {
   const oldPath = process.env.PATH;
   const oldPathKey = process.env.Path;
+  const basePath = process.platform === 'win32' ? (oldPathKey || oldPath || '') : (oldPath || '');
   const binDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'yyb-fake-bin-'));
   const downloadDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'yyb-download-test-'));
   const argvFile = path.join(downloadDir, 'argv.json');
@@ -735,7 +736,7 @@ test('aria2c 下载参数可用 fake 命令验证且文件名已净化', async (
   const script = process.platform === 'win32'
     ? [
         '@echo off',
-        'node "%~dp0fake-aria2c.js" %*',
+        `"${process.execPath}" "%~dp0fake-aria2c.js" %*`,
       ].join('\r\n')
     : [
         '#!/bin/sh',
@@ -743,7 +744,7 @@ test('aria2c 下载参数可用 fake 命令验证且文件名已净化', async (
       ].join('\n');
   fs.writeFileSync(fakeAria2c, script, { mode: 0o755 });
   clearCommandCache();
-  process.env.PATH = `${binDir}${path.delimiter}${oldPath || ''}`;
+  process.env.PATH = `${binDir}${path.delimiter}${basePath}`;
   if (process.platform === 'win32') {
     process.env.Path = process.env.PATH;
   }
