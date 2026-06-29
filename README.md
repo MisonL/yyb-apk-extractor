@@ -67,9 +67,13 @@ cd yyb-apk-extractor
 
 # （可选）安装全局命令
 npm link
+
+# 验证全局命令
+yyb-apk-extractor --help
+yyb-apk-extractor doctor
 ```
 
-> 不执行 `npm link` 也可以直接用 `node index.js` 运行。
+> 执行 `npm link` 后，可用 `yyb-apk-extractor` 代替 `node index.js`。不执行 `npm link` 也可以直接用 `node index.js` 运行。
 >
 > 设置环境变量 `NO_COLOR=1`（也支持空值 `NO_COLOR=`）或传入 `--no-color` 可禁用 CLI 颜色输出。
 

@@ -200,9 +200,10 @@ function showHelp() {
   process.exit(0);
 }
 
-function parseArgs(argv) {
+function parseArgs(argv, runtime = {}) {
   const args = argv.slice(2);
   const positionArgs = args.filter((arg) => !arg.startsWith('-'));
+  const stdinIsTTY = runtime.stdinIsTTY !== undefined ? runtime.stdinIsTTY : true;
   let mode = 'direct';
   let pkgNameOrUrl = '';
   let keyword = '';
@@ -289,10 +290,16 @@ function parseArgs(argv) {
     if (positionArgs.length > 0) {
       throw new Error('--interactive 模式不支持位置参数');
     }
+    if (!stdinIsTTY) {
+      throw new Error('非 TTY 终端无法进入交互模式；请提供包名、应用宝详情页 URL 或 search 命令');
+    }
     mode = 'interactive';
   }
 
   if (mode === 'direct' && !pkgNameOrUrl && !interactiveFlag) {
+    if (!stdinIsTTY) {
+      throw new Error('请提供包名或应用宝详情页 URL；非 TTY 终端无法进入交互模式');
+    }
     mode = 'interactive';
   }
 
@@ -479,22 +486,30 @@ function selectDownloader(options = {}, find = findCommand) {
   throw new Error(`${requested}${detail}`);
 }
 
+function normalizeProxyInput(proxy) {
+  const value = String(proxy || '').trim();
+  if (!value) return '';
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) return value;
+  return `http://${value}`;
+}
+
 function validateProxy(proxy) {
-  if (!proxy) return '';
+  const normalized = normalizeProxyInput(proxy);
+  if (!normalized) return '';
   let parsed;
   try {
-    parsed = new URL(proxy);
+    parsed = new URL(normalized);
   } catch {
-    throw new Error(`--proxy 不是有效 URL: ${maskUrl(proxy)}`);
+    throw new Error(`--proxy 不是有效 URL: ${maskUrl(normalized)}`);
   }
   if (!['http:', 'https:', 'socks5:', 'socks5h:'].includes(parsed.protocol)) {
-    throw new Error(`--proxy 仅支持 http/https/socks5/socks5h 协议: ${maskUrl(proxy)}`);
+    throw new Error(`--proxy 仅支持 http/https/socks5/socks5h 协议: ${maskUrl(normalized)}`);
   }
   if (!parsed.hostname || !parsed.port) {
-    throw new Error(`--proxy 必须包含主机和端口: ${maskUrl(proxy)}`);
+    throw new Error(`--proxy 必须包含主机和端口: ${maskUrl(normalized)}`);
   }
   if ((parsed.pathname && parsed.pathname !== '/') || parsed.search || parsed.hash) {
-    throw new Error(`--proxy 不能包含路径、查询串或片段: ${maskUrl(proxy)}`);
+    throw new Error(`--proxy 不能包含路径、查询串或片段: ${maskUrl(normalized)}`);
   }
   return parsed.toString();
 }
@@ -502,15 +517,16 @@ function validateProxy(proxy) {
 // 将代理 URL 拆分为“无凭据 URL”和“凭据”，避免在子进程参数/环境中暴露密码
 function splitProxyAuth(proxyUrl) {
   if (!proxyUrl) return { url: '', username: '', password: '' };
+  const normalized = normalizeProxyInput(proxyUrl);
   try {
-    const u = new URL(proxyUrl);
+    const u = new URL(normalized);
     const username = safeDecodeURIComponent(u.username);
     const password = safeDecodeURIComponent(u.password);
     u.username = '';
     u.password = '';
     return { url: u.toString(), username, password };
   } catch {
-    return { url: proxyUrl, username: '', password: '' };
+    return { url: maskUrl(normalized), username: '', password: '' };
   }
 }
 
@@ -733,13 +749,21 @@ function assertAllowedHttpUrl(value, label) {
 }
 
 function maskUrl(value) {
+  const raw = String(value || '');
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) {
+    const masked = raw.replace(/^([^:/\s]+):([^@\s]+)@/, '***:***@');
+    if (masked !== raw) return masked;
+  }
   try {
-    const u = new URL(value);
+    const u = new URL(raw);
     if (u.username) u.username = '***';
     if (u.password) u.password = '***';
     return u.toString();
   } catch {
-    return value;
+    return raw.replace(
+      /^([a-z][a-z0-9+.-]*:\/\/)?([^:/\s]+):([^@\s]+)@/i,
+      (match, protocol = '') => `${protocol}***:***@`
+    );
   }
 }
 
@@ -748,7 +772,8 @@ function maskProxySecrets(text) {
   return String(text)
     .replace(/(proxy\s*=\s*")([^"]+)(")/gi, (m, a, b, c) => `${a}${maskUrl(b)}${c}`)
     .replace(/(all-proxy=)([^\s]+)/gi, (m, a, b) => `${a}${maskUrl(b)}`)
-    .replace(/((?:https?|socks5h?):\/\/)([^@\s]+)@/gi, '$1***@');
+    .replace(/((?:https?|socks5h?):\/\/)([^@\s]+)@/gi, '$1***:***@')
+    .replace(/(^|\s)([^:/\s]+):([^@/\s]+)@([^\s]+)/g, '$1***:***@$4');
 }
 
 // 终端输出安全净化：过滤来自网络的字符串中的 ANSI 转义序列、C1 控制字符与换行/回车
@@ -933,6 +958,11 @@ function formatDoctorSummary(info) {
     lines.push(`提示: ${note}`);
   }
   return lines.join('\n');
+}
+
+function formatExtractSummary(result) {
+  const count = Array.isArray(result.allUrls) ? result.allUrls.length : 0;
+  return `已找到 APK 链接: ${result.pkgName} (${count} 个候选)`;
 }
 
 function buildAria2cDownloadArgs({
@@ -1595,7 +1625,7 @@ async function downloadApk(apkUrl, pkgName, downloadDir, options = {}) {
   const referer = 'https://a.app.qq.com/';
 
   const proxyEnv = createChildEnv(options);
-  const stdio = options.verbose ? 'inherit' : 'pipe';
+  const stdio = 'pipe';
   const timeoutSec = timeoutSeconds(options);
 
   function runTool(exe, args) {
@@ -1625,6 +1655,12 @@ async function downloadApk(apkUrl, pkgName, downloadDir, options = {}) {
     const invocation = buildCommandInvocation(exe, args);
     const result = spawnSync(invocation.command, invocation.args, mergeInvocationSpawnOptions(spawnOptions, invocation));
     if (result.error) throw result.error;
+    if (options.verbose) {
+      const stdout = sanitizeProcessOutput(result.stdout);
+      const stderr = sanitizeProcessOutput(result.stderr);
+      if (stdout) console.error(stdout);
+      if (stderr) console.error(stderr);
+    }
     if (result.status !== 0) {
       const stderr = sanitizeProcessOutput(result.stderr);
       throw new Error(`下载工具 ${exe} 退出码 ${result.status}${stderr ? ': ' + stderr : ''}`);
@@ -1784,11 +1820,18 @@ function formatSearchResultsSummary(result) {
   if (result.results.length > 5) {
     lines.push(`... 还有 ${result.results.length - 5} 条`);
   }
-  lines.push('可直接用 select <序号> 或 download <序号> 继续。');
+  if (result.results.length > 0) {
+    lines.push('可直接用 select <序号> 或 download <序号> 继续。');
+  } else {
+    lines.push('没有搜索到应用，可换一个关键词重试。');
+  }
   return lines.join('\n');
 }
 
 function parseResultIndex(arg, total) {
+  if (!String(arg || '').trim()) {
+    return { error: '请指定序号，例如: select 1 或 download 1' };
+  }
   if (!/^\d+$/.test(arg)) {
     return { error: '序号必须是正整数' };
   }
@@ -1826,6 +1869,9 @@ function handleInteractiveSelect(arg, state) {
 }
 
 async function handleInteractiveDownload(arg, state, options, ask, isClosed) {
+  if (arg && isDirectAppInput(arg)) {
+    return handleInteractiveGet(arg, state, options, ask, isClosed);
+  }
   if (!state.results.length && !state.selected) {
     console.error('暂无搜索结果，先输入 search <关键词>');
     return;
@@ -2080,7 +2126,7 @@ async function runInteractive(options) {
 }
 
 async function main() {
-  const { mode, pkgNameOrUrl, keyword, options } = parseArgs(process.argv);
+  const { mode, pkgNameOrUrl, keyword, options } = parseArgs(process.argv, { stdinIsTTY: Boolean(process.stdin.isTTY) });
 
   if (mode === 'interactive') {
     await runInteractive(options);
@@ -2089,7 +2135,7 @@ async function main() {
 
   if (mode === 'search') {
     const result = await searchApps(keyword, options);
-    if (process.stdout.isTTY || process.stderr.isTTY) {
+    if (process.stderr.isTTY) {
       console.error(formatSearchResultsSummary(result));
     }
     console.log(JSON.stringify(result, null, 2));
@@ -2097,12 +2143,19 @@ async function main() {
   }
 
   if (mode === 'doctor') {
-    console.log(JSON.stringify(collectDoctorInfo(), null, 2));
+    const info = collectDoctorInfo();
+    if (process.stderr.isTTY) {
+      console.error(formatDoctorSummary(info));
+    }
+    console.log(JSON.stringify(info, null, 2));
     return;
   }
 
   // 原有直接提取模式
   const result = await extractApkDownloadUrl(pkgNameOrUrl, options);
+  if (process.stderr.isTTY) {
+    console.error(formatExtractSummary(result));
+  }
   const downloadDir = resolveDirectDownloadDir(pkgNameOrUrl, options);
 
   if (downloadDir) {
@@ -2168,6 +2221,7 @@ module.exports = {
   formatAppConfirmSummary,
   formatBytes,
   getPkgName,
+  formatExtractSummary,
   hasProxyCredentials,
   isAria2cProxySupported,
   isDirectAppInput,
@@ -2177,6 +2231,7 @@ module.exports = {
   maskUrl,
   maybeDownloadAfterConfirm,
   normalizeUrl,
+  normalizeProxyInput,
   normalizeInteractiveCommand,
   parseAppEntriesFromHtml,
   parseApkUrlFromHtml,

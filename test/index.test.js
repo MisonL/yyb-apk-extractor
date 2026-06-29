@@ -23,11 +23,14 @@ const {
   getSupportedSignals,
   mergeInvocationSpawnOptions,
   isExistingWindowsExecutableCandidate,
+  maskUrl,
   isValidPkgName,
   isDirectAppInput,
   findAppInfoFromHtml,
   formatAppConfirmSummary,
+  formatExtractSummary,
   normalizeInteractiveCommand,
+  normalizeProxyInput,
   parseConnections,
   parseCustomDirConfirmAnswer,
   parseDownloader,
@@ -366,6 +369,17 @@ test('搜索结果摘要适合终端快速浏览', () => {
   assert.ok(summary.includes('- 微信 | com.tencent.mm | 8.0.74 | 腾讯 | 249.05 MB'));
   assert.ok(summary.includes('可直接用 select <序号> 或 download <序号> 继续。'));
 });
+test('搜索结果为空时摘要给出重试提示', () => {
+  const summary = formatSearchResultsSummary({ query: '不存在', count: 0, results: [] });
+  assert.ok(summary.includes('没有搜索到应用，可换一个关键词重试。'));
+  assert.ok(!summary.includes('select <序号>'));
+});
+test('直接提取摘要适合终端快速浏览', () => {
+  assert.strictEqual(
+    formatExtractSummary({ pkgName: 'com.tencent.mm', allUrls: ['a', 'b'] }),
+    '已找到 APK 链接: com.tencent.mm (2 个候选)'
+  );
+});
 test('确认下载摘要展示详细应用信息', () => {
   const summary = formatAppConfirmSummary(
     {
@@ -470,6 +484,18 @@ test('无参数默认进入交互模式', () => {
   assert.strictEqual(pkgNameOrUrl, '');
   assert.strictEqual(keyword, '');
 });
+test('非 TTY 无参数运行给出明确提示', () => {
+  assert.throws(
+    () => parseArgs(['node', 'index.js'], { stdinIsTTY: false }),
+    /非 TTY 终端无法进入交互模式/
+  );
+});
+test('非 TTY 显式交互模式也会提早拒绝', () => {
+  assert.throws(
+    () => parseArgs(['node', 'index.js', '--interactive'], { stdinIsTTY: false }),
+    /非 TTY 终端无法进入交互模式/
+  );
+});
 test('搜索模式解析关键词并 trim 后校验长度', () => {
   const { mode, keyword } = parseArgs(['node', 'index.js', 'search', '  微信  ']);
   assert.strictEqual(mode, 'search');
@@ -557,6 +583,7 @@ test('交互下载命令支持直接选择搜索结果序号', () => {
   assert.deepStrictEqual(parseResultIndex('1', 3), { idx: 0 });
   assert.strictEqual(parseResultIndex('0', 3).error, '序号超出范围');
   assert.strictEqual(parseResultIndex('x', 3).error, '序号必须是正整数');
+  assert.strictEqual(parseResultIndex('', 3).error, '请指定序号，例如: select 1 或 download 1');
 });
 test('交互命令大小写不敏感', () => {
   assert.strictEqual(normalizeInteractiveCommand('Search'), 'search');
@@ -844,7 +871,14 @@ test('下载到非 APK 文件时关闭文件后再清理', () => {
 
 section('\n=== 代理校验 ===');
 test('合法代理 URL 通过', () => {
+  assert.strictEqual(normalizeProxyInput(''), '');
+  assert.strictEqual(normalizeProxyInput('   '), '');
+  assert.strictEqual(normalizeProxyInput('127.0.0.1:7890'), 'http://127.0.0.1:7890');
+  assert.strictEqual(normalizeProxyInput('user:pass@127.0.0.1:7890'), 'http://user:pass@127.0.0.1:7890');
+  assert.strictEqual(normalizeProxyInput('[::1]:7890'), 'http://[::1]:7890');
+  assert.strictEqual(normalizeProxyInput('socks5h://127.0.0.1:1080'), 'socks5h://127.0.0.1:1080');
   assert.strictEqual(validateProxy('http://127.0.0.1:7890'), 'http://127.0.0.1:7890/');
+  assert.strictEqual(validateProxy('127.0.0.1:7890'), 'http://127.0.0.1:7890/');
   assert.strictEqual(validateProxy('socks5h://127.0.0.1:1080'), 'socks5h://127.0.0.1:1080');
 });
 test('代理凭据校验通过', () => {
@@ -853,8 +887,22 @@ test('代理凭据校验通过', () => {
 test('非法代理协议拒绝', () => {
   assert.throws(() => validateProxy('ftp://127.0.0.1:7890'), /仅支持/);
 });
+test('代理错误信息会隐藏无协议输入中的凭据', () => {
+  assert.strictEqual(maskUrl('user:secret@127.0.0.1'), '***:***@127.0.0.1');
+  assert.throws(() => validateProxy('user:secret@127.0.0.1'), (err) => {
+    assert.ok(err.message.includes('***'));
+    assert.ok(!err.message.includes('secret'));
+    return true;
+  });
+});
 test('splitProxyAuth 剥离凭据', () => {
   const result = splitProxyAuth('http://user:pass@127.0.0.1:7890');
+  assert.strictEqual(result.url, 'http://127.0.0.1:7890/');
+  assert.strictEqual(result.username, 'user');
+  assert.strictEqual(result.password, 'pass');
+});
+test('splitProxyAuth 可剥离无协议代理凭据', () => {
+  const result = splitProxyAuth('user:pass@127.0.0.1:7890');
   assert.strictEqual(result.url, 'http://127.0.0.1:7890/');
   assert.strictEqual(result.username, 'user');
   assert.strictEqual(result.password, 'pass');
@@ -907,6 +955,18 @@ test('默认子进程环境变量不透传父进程代理凭据', () => {
     else process.env.ALL_PROXY = oldAllProxy;
   }
 });
+test('默认子进程环境变量不透传无协议代理凭据', () => {
+  const oldHttpProxy = process.env.HTTP_PROXY;
+  process.env.HTTP_PROXY = 'user:secret@127.0.0.1:7890';
+  try {
+    const env = createChildEnv({ proxy: '', ignoreProxyEnv: false });
+    assert.strictEqual(env.HTTP_PROXY, 'http://127.0.0.1:7890/');
+    assert.ok(!env.HTTP_PROXY.includes('secret'));
+  } finally {
+    if (oldHttpProxy === undefined) delete process.env.HTTP_PROXY;
+    else process.env.HTTP_PROXY = oldHttpProxy;
+  }
+});
 test('默认子进程环境变量按大小写不敏感处理代理变量', () => {
   const oldMixedProxy = process.env.Http_Proxy;
   process.env.Http_Proxy = 'http://user:secret@127.0.0.1:7890';
@@ -944,16 +1004,7 @@ test('认证代理通过工具配置输入承载，不拼入无凭据 URL', () =
   assert.ok(buildAria2cProxyConfigText(proxy).includes('secret'));
   assert.ok(!url.includes('secret'));
 });
-test('带 stdin 的 verbose 下载命令仍继承 stdout/stderr', () => {
-  const options = buildSpawnOptions({
-    env: {},
-    stdio: 'inherit',
-    input: 'proxy = "http://user:secret@127.0.0.1:7890/"\n',
-  });
-  assert.deepStrictEqual(options.stdio, ['pipe', 'inherit', 'inherit']);
-  assert.ok(options.input.includes('secret'));
-});
-test('带 stdin 的非 verbose 下载命令保留错误输出并限制缓冲', () => {
+test('带 stdin 的下载命令保留错误输出并限制缓冲', () => {
   const options = buildSpawnOptions({
     env: {},
     stdio: 'pipe',
@@ -1013,12 +1064,15 @@ test('工具失败 stderr 中的代理凭据会脱敏', () => {
     'failed http://user:secret@127.0.0.1:7890/',
     'failed socks5://user:secret@127.0.0.1:1080',
     'failed socks5h://user:secret@127.0.0.1:1080',
+    'failed user:secret@127.0.0.1:7890',
   ].join('\n');
   const sanitized = sanitizeProcessOutput(text);
   assert.ok(!sanitized.includes('secret'));
-  assert.ok(sanitized.includes('http://***@127.0.0.1:7890/'));
-  assert.ok(sanitized.includes('socks5://***@127.0.0.1:1080'));
-  assert.ok(sanitized.includes('socks5h://***@127.0.0.1:1080'));
+  assert.ok(sanitized.includes('http://***:***@127.0.0.1:7890/'));
+  assert.ok(sanitized.includes('socks5://***:***@127.0.0.1:1080'));
+  assert.ok(sanitized.includes('socks5h://***:***@127.0.0.1:1080'));
+  assert.ok(sanitized.includes('***:***@127.0.0.1:7890'));
+  assert.strictEqual(maskUrl('http://user:secret@127.0.0.1[bad]'), 'http://***:***@127.0.0.1[bad]');
 });
 
 section('\n=== readline 封装 ===');
