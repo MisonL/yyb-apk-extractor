@@ -21,6 +21,7 @@ const {
   getCurlOutputTarget,
   getDownloadOrder,
   getSupportedSignals,
+  mergeInvocationSpawnOptions,
   isExistingWindowsExecutableCandidate,
   isValidPkgName,
   isDirectAppInput,
@@ -636,6 +637,29 @@ test('Windows .cmd 下载工具通过 cmd.exe 受控执行', () => {
     else process.env.ComSpec = oldComSpec;
   }
 });
+test('Windows .cmd 下载工具拒绝危险参数字符', () => {
+  assert.throws(
+    () => buildCommandInvocation('C:\\fake bin\\aria2c.cmd', ['--dir', 'C:\\out"&calc'], 'win32'),
+    /不能包含双引号或控制字符/
+  );
+  assert.throws(
+    () => buildCommandInvocation('C:\\fake bin\\aria2c.cmd', ['--dir', 'C:\\out\nbad'], 'win32'),
+    /不能包含双引号或控制字符/
+  );
+  assert.deepStrictEqual(
+    buildCommandInvocation('aria2c', ['--dir', 'C:\\out"&calc'], 'win32'),
+    { command: 'aria2c', args: ['--dir', 'C:\\out"&calc'] }
+  );
+});
+test('子进程包装选项保留基础配置并合并 Windows 参数策略', () => {
+  assert.deepStrictEqual(
+    mergeInvocationSpawnOptions(
+      { env: { PATH: 'x' }, timeout: 123, stdio: 'pipe' },
+      { spawnOptions: { windowsVerbatimArguments: true } }
+    ),
+    { env: { PATH: 'x' }, timeout: 123, stdio: 'pipe', windowsVerbatimArguments: true }
+  );
+});
 test('Windows 已存在命令候选可直接识别', () => {
   const tempDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'yyb-win-candidate-'));
   const candidate = path.join(tempDir, 'aria2c.cmd');
@@ -791,6 +815,7 @@ test('aria2c 下载参数可用 fake 命令验证且文件名已净化', async (
     assert.strictEqual(argv[argv.indexOf('-x') + 1], '4');
     assert.ok(argv.includes('-s'));
     assert.strictEqual(argv[argv.indexOf('-s') + 1], '4');
+    assert.strictEqual(argv[argv.length - 1], 'http://imtt.dd.qq.com/sjy.00022/app.apk?fsname=CON%3Abad%3F.apk');
     assert.strictEqual(fs.readFileSync(filePath).slice(0, 4).toString('hex'), '504b0304');
   } finally {
     console.error = oldConsoleError;

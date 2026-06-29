@@ -676,8 +676,23 @@ function buildSpawnOptions({ env, stdio, input }) {
   return spawnOptions;
 }
 
+function mergeInvocationSpawnOptions(baseOptions, invocation) {
+  return {
+    ...baseOptions,
+    ...(invocation.spawnOptions || {}),
+  };
+}
+
 function isWindowsCommandScript(commandPath, platform = process.platform) {
   return platform === 'win32' && /\.(?:cmd|bat)$/i.test(commandPath);
+}
+
+function assertSafeWindowsCommandScriptArgs(values) {
+  for (const value of values) {
+    if (/["\r\n\0]/.test(String(value))) {
+      throw new Error('Windows .cmd/.bat 下载工具参数不能包含双引号或控制字符');
+    }
+  }
 }
 
 function quoteCmdArg(value) {
@@ -688,6 +703,7 @@ function buildCommandInvocation(command, args, platform = process.platform) {
   if (!isWindowsCommandScript(command, platform)) {
     return { command, args };
   }
+  assertSafeWindowsCommandScriptArgs([command, ...args]);
   const commandLine = [command, ...args].map(quoteCmdArg).join(' ');
   return {
     command: process.env.ComSpec || 'cmd.exe',
@@ -1153,13 +1169,15 @@ function fetchHtmlWithCurl(url, options, redirectCount = 0) {
   args.push(url);
 
   log(options, `执行 curl 获取页面: ${url}`);
-  const result = spawnSync(curl, args, {
+  const invocation = buildCommandInvocation(curl, args);
+  const result = spawnSync(invocation.command, invocation.args, mergeInvocationSpawnOptions({
     encoding: 'utf-8',
     stdio: 'pipe',
     maxBuffer: 10 * 1024 * 1024,
     input: options.proxy && hasProxyCredentials(options.proxy) ? buildCurlProxyConfigInput(options.proxy) : undefined,
     env: createChildEnv(options),
-  });
+    timeout: options.timeout || 30000,
+  }, invocation));
 
   if (result.error) {
     throw new Error(`curl 执行失败: ${result.error.message}`);
@@ -1386,13 +1404,15 @@ function resolveDownloadRedirects(url, options, redirectCount = 0) {
   }
   args.push(safeUrl);
 
-  const result = spawnSync(curl, args, {
+  const invocation = buildCommandInvocation(curl, args);
+  const result = spawnSync(invocation.command, invocation.args, mergeInvocationSpawnOptions({
     encoding: 'utf-8',
     stdio: 'pipe',
     maxBuffer: 1024 * 1024,
     input: options.proxy && hasProxyCredentials(options.proxy) ? buildCurlProxyConfigInput(options.proxy) : undefined,
     env: createChildEnv(options),
-  });
+    timeout: options.timeout || 30000,
+  }, invocation));
 
   if (result.error) {
     throw new Error(`curl 解析下载重定向失败: ${result.error.message}`);
@@ -1601,12 +1621,12 @@ async function downloadApk(apkUrl, pkgName, downloadDir, options = {}) {
       }
     }
     log(options, `执行下载命令: ${exe} ${logArgs.join(' ')}`);
-    const spawnOptions = buildSpawnOptions({ env: proxyEnv, stdio, input });
+    const spawnOptions = {
+      ...buildSpawnOptions({ env: proxyEnv, stdio, input }),
+      timeout: options.timeout || 30000,
+    };
     const invocation = buildCommandInvocation(exe, args);
-    const result = spawnSync(invocation.command, invocation.args, {
-      ...spawnOptions,
-      ...(invocation.spawnOptions || {}),
-    });
+    const result = spawnSync(invocation.command, invocation.args, mergeInvocationSpawnOptions(spawnOptions, invocation));
     if (result.error) throw result.error;
     if (result.status !== 0) {
       const stderr = sanitizeProcessOutput(result.stderr);
@@ -2052,7 +2072,7 @@ async function runInteractive(options) {
           break;
         }
       } catch (e) {
-        console.error(`${c.red}[error]${c.reset} ${e.message}`);
+        console.error(`${c.red}[error]${c.reset} ${sanitizeTerminalOutput(e.message)}`);
       } finally {
         state.busy = false;
       }
@@ -2146,6 +2166,7 @@ module.exports = {
   getCurlOutputTarget,
   getDownloadOrder,
   getSupportedSignals,
+  mergeInvocationSpawnOptions,
   downloadApk,
   formatAppConfirmSummary,
   formatBytes,
