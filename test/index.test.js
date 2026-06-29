@@ -15,6 +15,7 @@ const {
   createChildEnv,
   downloadApk,
   getDownloadOrder,
+  getSupportedSignals,
   isValidPkgName,
   isDirectAppInput,
   findAppInfoFromHtml,
@@ -624,6 +625,17 @@ test('wget 下载参数允许有限重定向并支持证书降级', () => {
   assert.ok(args.includes('--no-check-certificate'));
   assert.strictEqual(args[args.length - 1], 'http://imtt.dd.qq.com/app.apk');
 });
+test('wget verbose 模式保留工具输出', () => {
+  const args = buildWgetDownloadArgs({
+    filePath: '/tmp/app.apk',
+    safeApkUrl: 'http://imtt.dd.qq.com/app.apk',
+    timeoutSec: '30',
+    ua: 'test-ua',
+    referer: 'https://a.app.qq.com/',
+    options: { verbose: true },
+  });
+  assert.strictEqual(args.includes('--no-verbose'), false);
+});
 test('aria2c 参数构造包含多连接、超时、请求头与净化文件名', () => {
   const args = buildAria2cDownloadArgs({
     fileName: sanitizeDownloadFileName('CON:bad?.apk', 'com.example.app.apk'),
@@ -709,6 +721,52 @@ test('aria2c 下载参数可用 fake 命令验证且文件名已净化', async (
     console.error = oldConsoleError;
     process.env.PATH = oldPath;
     delete process.env.YYB_ARGV_FILE;
+    fs.rmSync(binDir, { recursive: true, force: true });
+    fs.rmSync(downloadDir, { recursive: true, force: true });
+  }
+});
+
+test('下载到非 APK 文件时关闭文件后再清理', async () => {
+  const oldPath = process.env.PATH;
+  const binDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'yyb-fake-bin-'));
+  const downloadDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'yyb-download-bad-'));
+  const fakeCurl = path.join(binDir, 'curl');
+  fs.writeFileSync(fakeCurl, [
+    '#!/bin/sh',
+    'if [ "$1" = "--version" ]; then exit 0; fi',
+    'for arg in "$@"; do',
+    '  if [ "$arg" = "-D" ]; then printf "HTTP/1.1 200 OK\\r\\n\\r\\n"; exit 0; fi',
+    'done',
+    'out=""',
+    'while [ "$#" -gt 0 ]; do',
+    '  if [ "$1" = "-o" ]; then shift; out="$1"; fi',
+    '  shift',
+    'done',
+    'printf "<!doctype html>" > "$out"',
+  ].join('\n'), { mode: 0o755 });
+  process.env.PATH = `${binDir}${path.delimiter}${oldPath || ''}`;
+  const oldConsoleError = console.error;
+  console.error = () => {};
+  try {
+    await assert.rejects(
+      () => downloadApk(
+        'http://imtt.dd.qq.com/sjy.00022/app.apk?fsname=bad.apk',
+        'com.example.app',
+        downloadDir,
+        {
+          downloader: 'curl',
+          timeout: 30000,
+          verbose: true,
+          proxy: '',
+          ignoreProxyEnv: true,
+        }
+      ),
+      /已自动清理/
+    );
+    assert.strictEqual(fs.existsSync(path.join(downloadDir, 'bad.apk')), false);
+  } finally {
+    console.error = oldConsoleError;
+    process.env.PATH = oldPath;
     fs.rmSync(binDir, { recursive: true, force: true });
     fs.rmSync(downloadDir, { recursive: true, force: true });
   }
@@ -851,6 +909,16 @@ test('进程级临时文件清理会清空待清理配置', () => {
   const dir = path.dirname(tempConfig.filePath);
   cleanupTempFiles();
   assert.strictEqual(fs.existsSync(dir), false);
+});
+test('按平台过滤临时文件清理信号', () => {
+  assert.deepStrictEqual(
+    getSupportedSignals(['SIGHUP', 'SIGINT', 'SIGTERM', 'SIGBREAK'], 'win32'),
+    ['SIGINT', 'SIGTERM', 'SIGBREAK']
+  );
+  assert.deepStrictEqual(
+    getSupportedSignals(['SIGHUP', 'SIGINT', 'SIGTERM', 'SIGBREAK'], 'darwin'),
+    ['SIGHUP', 'SIGINT', 'SIGTERM']
+  );
 });
 test('工具失败 stderr Buffer 可正确转成文本', () => {
   const buf = Buffer.from('proxy failed', 'utf8');

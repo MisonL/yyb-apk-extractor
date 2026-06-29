@@ -544,11 +544,19 @@ function cleanupTempFiles() {
   }
 }
 
+function getSupportedSignals(signals, platform = process.platform) {
+  return signals.filter((signal) => {
+    if (signal === 'SIGBREAK') return platform === 'win32';
+    if (signal === 'SIGHUP') return platform !== 'win32';
+    return true;
+  });
+}
+
 function installTempCleanupHandlers() {
   if (tempCleanupHandlersInstalled) return;
   tempCleanupHandlersInstalled = true;
   process.once('exit', cleanupTempFiles);
-  for (const signal of TEMP_CLEANUP_SIGNALS) {
+  for (const signal of getSupportedSignals(TEMP_CLEANUP_SIGNALS)) {
     process.once(signal, () => {
       cleanupTempFiles();
       process.exit(signal === 'SIGINT' ? 130 : 143);
@@ -909,12 +917,12 @@ function buildWgetDownloadArgs({
   const args = [
     '-T', timeoutSec,
     '-c',
-    '--no-verbose',
     '--max-redirect=5',
     '-O', filePath,
     `--user-agent=${ua}`,
     `--referer=${referer}`,
   ];
+  if (!options.verbose) args.push('--no-verbose');
   if (options.insecure) args.push('--no-check-certificate');
   args.push(safeApkUrl);
   return args;
@@ -1545,16 +1553,20 @@ async function downloadApk(apkUrl, pkgName, downloadDir, options = {}) {
 
   // 完整性校验 2：APK 本质是 ZIP，读取前 4 字节魔数 PK\x03\x04 (504b0304)
   let fd;
+  let invalidMagic = '';
   try {
     const magic = Buffer.alloc(4);
     fd = fs.openSync(filePath, 'r');
     fs.readSync(fd, magic, 0, 4, 0);
     if (magic.toString('hex') !== '504b0304') {
-      try { fs.unlinkSync(filePath); } catch {}
-      throw new Error(`下载的文件不是合法 APK/ZIP (魔数 ${magic.toString('hex')} 不匹配 504b0304)，已自动清理`);
+      invalidMagic = magic.toString('hex');
     }
   } finally {
     if (fd !== undefined) fs.closeSync(fd);
+  }
+  if (invalidMagic) {
+    try { fs.unlinkSync(filePath); } catch {}
+    throw new Error(`下载的文件不是合法 APK/ZIP (魔数 ${invalidMagic} 不匹配 504b0304)，已自动清理`);
   }
 
   if (!options.verbose) {
@@ -2028,6 +2040,7 @@ module.exports = {
   findAppInfoFromHtml,
   formatDoctorSummary,
   getDownloadOrder,
+  getSupportedSignals,
   downloadApk,
   formatAppConfirmSummary,
   formatBytes,
