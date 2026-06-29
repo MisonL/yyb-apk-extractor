@@ -4,8 +4,8 @@
 
 [![Node.js >= 16.3.0](https://img.shields.io/badge/Node.js-%3E%3D16.3.0-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![CI](https://github.com/MisonL/yyb-apk-extractor/actions/workflows/ci.yml/badge.svg)](https://github.com/MisonL/yyb-apk-extractor/actions/workflows/ci.yml)
-[![License: ISC](https://img.shields.io/badge/License-ISC-blue.svg)](./LICENSE)
-[![Platform](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)]()
+[![许可证: ISC](https://img.shields.io/badge/License-ISC-blue.svg)](./LICENSE)
+[![平台](https://img.shields.io/badge/Platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)]()
 
 `yyb-apk-extractor` 面向脚本、CI 和日常命令行使用：可以输入 Android 包名、应用宝详情页 URL，或先搜索应用宝再选择下载。除 `--help` / `--version` 外，成功输出保持 JSON，便于接入 `jq`、自动化任务和其他工具。
 
@@ -114,7 +114,7 @@ node index.js --interactive
 
 不带参数进入交互模式需要真实 TTY。CI、管道或重定向输入等非 TTY 环境下，请显式传入包名、应用宝详情页 URL、`search` 或 `doctor` 命令。
 
-命令成功时，`stdout` 保持 JSON 输出；终端摘要、下载进度和 verbose 调试信息写入 `stderr`。设置环境变量 `NO_COLOR=1`（也支持空值 `NO_COLOR=`）或传入 `--no-color` 可禁用 CLI 颜色输出。
+命令成功时，标准输出 `stdout` 保持 JSON 输出；终端摘要、下载进度和详细调试信息写入标准错误 `stderr`。设置环境变量 `NO_COLOR=1`（也支持空值 `NO_COLOR=`）或传入 `--no-color` 可禁用 CLI 颜色输出。
 
 ### 选项
 
@@ -345,8 +345,8 @@ npm run check
 
 `npm test` 执行语法检查和单元测试；`npm run check` 会额外执行 `npm pack --dry-run`，用于提交前确认发布包内容。
 
-测试覆盖参数解析、搜索结果解析、下载器选择、代理凭据脱敏、CLI stdout/stderr 行为、交互输入解析，以及不依赖真实网络的 fake `aria2c` 下载链路。GitHub Actions 会在 macOS 15、Linux、Windows 的 Node.js 16 / 20 / 24 上运行同一组测试。
+测试覆盖参数解析、搜索结果解析、下载器选择、代理凭据脱敏、CLI 标准输出/标准错误行为、交互输入解析，以及不依赖真实网络的模拟 `aria2c` 下载链路。GitHub Actions 会在 macOS 15、Linux、Windows 的 Node.js 16 / 20 / 24 上运行同一组测试。
 
-## License
+## 许可证
 
 [ISC](./LICENSE)

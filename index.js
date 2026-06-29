@@ -108,6 +108,12 @@ function createColors(enabled) {
     : Object.fromEntries(COLOR_KEYS.map((k) => [k, '']));
 }
 
+function setDefaultStreamEncoding(stream, encoding = 'utf8') {
+  if (stream && typeof stream.setDefaultEncoding === 'function') {
+    stream.setDefaultEncoding(encoding);
+  }
+}
+
 const c = createColors(shouldUseColor(process.stderr));
 
 function padEnd(str, len) {
@@ -2180,6 +2186,8 @@ function registerGlobalErrorHandlers() {
 }
 
 if (require.main === module) {
+  setDefaultStreamEncoding(process.stdout);
+  setDefaultStreamEncoding(process.stderr);
   registerGlobalErrorHandlers();
   main().catch((err) => {
     console.error(`${c.red}[error]${c.reset} ${err.message}`);
@@ -2255,6 +2263,7 @@ module.exports = {
   sanitizeTerminalOutput,
   sanitizeProcessOutput,
   searchApps,
+  setDefaultStreamEncoding,
   shouldUseColor,
   splitProxyAuth,
   timeoutSeconds,

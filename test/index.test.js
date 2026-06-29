@@ -59,6 +59,7 @@ const {
   verifyDownloadedApkFile,
   writeTempConfigFile,
   splitProxyAuth,
+  setDefaultStreamEncoding,
   handleInteractiveTimeout,
   createReadline,
   shouldUseColor,
@@ -150,6 +151,17 @@ test('NO_COLOR 只要存在就禁用颜色', () => {
   assert.strictEqual(shouldUseColor({ isTTY: true }, ['node', 'index.js'], { NO_COLOR: '' }), false);
   assert.strictEqual(shouldUseColor({ isTTY: false }, ['node', 'index.js'], {}), false);
   assert.strictEqual(shouldUseColor({ isTTY: true }, ['node', 'index.js', '--no-color'], {}), false);
+});
+test('默认流编码初始化为 UTF-8', () => {
+  const stream = {
+    encoding: '',
+    setDefaultEncoding(value) {
+      this.encoding = value;
+    },
+  };
+  setDefaultStreamEncoding(stream);
+  assert.strictEqual(stream.encoding, 'utf8');
+  assert.doesNotThrow(() => setDefaultStreamEncoding({}, 'utf8'));
 });
 
 test('禁用颜色时 ANSI 码为空', () => {
