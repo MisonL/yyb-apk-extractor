@@ -54,6 +54,8 @@ sudo apt-get install curl aria2 wget
 # Windows 10/11 通常内置 curl；aria2c / wget 可通过 winget、Scoop、Chocolatey 或官方 release 安装并加入 PATH
 ```
 
+Windows 终端建议使用 Windows Terminal 或 PowerShell，并保持 UTF-8 输出环境。老旧 `cmd.exe` 若仍使用 GBK / CP936 代码页，中文提示和中文搜索关键词可能显示异常；可先执行 `chcp 65001` 后再运行本工具。
+
 ---
 
 ## 安装
@@ -69,7 +71,7 @@ npm link
 
 > 不执行 `npm link` 也可以直接用 `node index.js` 运行。
 >
-> 设置环境变量 `NO_COLOR=1` 或传入 `--no-color` 可禁用 CLI 颜色输出。
+> 设置环境变量 `NO_COLOR=1`（也支持空值 `NO_COLOR=`）或传入 `--no-color` 可禁用 CLI 颜色输出。
 
 ---
 
@@ -329,7 +331,7 @@ node index.js com.example.app --proxy=socks5h://127.0.0.1:7890
 npm test
 ```
 
-测试覆盖参数解析、搜索结果解析、下载器选择、代理凭据脱敏、交互输入解析，以及不依赖真实网络的 fake `aria2c` 下载链路。GitHub Actions 会在 macOS、Linux、Windows 的 Node.js 16 / 20 / 24 上运行同一组测试。
+测试覆盖参数解析、搜索结果解析、下载器选择、代理凭据脱敏、交互输入解析，以及不依赖真实网络的 fake `aria2c` 下载链路。GitHub Actions 会在 macOS 15、Linux、Windows 的 Node.js 16 / 20 / 24 上运行同一组测试。
 
 ---
 

@@ -688,7 +688,6 @@ test('aria2c 参数构造包含多连接、超时、请求头与净化文件名'
   assert.strictEqual(args[args.length - 1], 'http://imtt.dd.qq.com/sjy.00022/app.apk');
 });
 test('aria2c 下载参数可用 fake 命令验证且文件名已净化', async () => {
-  if (process.platform === 'win32') return;
   const oldPath = process.env.PATH;
   const binDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'yyb-fake-bin-'));
   const downloadDir = fs.mkdtempSync(path.join(require('os').tmpdir(), 'yyb-download-test-'));
@@ -708,7 +707,7 @@ test('aria2c 下载参数可用 fake 命令验证且文件名已净化', async (
   const script = process.platform === 'win32'
     ? [
         '@echo off',
-        `node "%~dp0fake-aria2c.js" %*`,
+        'node "%~dp0fake-aria2c.js" %*',
       ].join('\r\n')
     : [
         '#!/bin/sh',
