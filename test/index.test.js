@@ -627,8 +627,9 @@ test('Windows .cmd 下载工具通过 cmd.exe 受控执行', () => {
     const invocation = buildCommandInvocation('C:\\fake bin\\aria2c.cmd', ['--dir', 'C:\\out dir', 'http://example.com/a.apk?x=1&y=2'], 'win32');
     assert.strictEqual(invocation.command, 'C:\\Windows\\System32\\cmd.exe');
     assert.deepStrictEqual(invocation.args.slice(0, 3), ['/d', '/s', '/c']);
-    assert.ok(invocation.args[3].includes('"C:\\fake bin\\aria2c.cmd"'));
+    assert.ok(invocation.args[3].startsWith('""C:\\fake bin\\aria2c.cmd"'));
     assert.ok(invocation.args[3].includes('"http://example.com/a.apk?x=1&y=2"'));
+    assert.ok(invocation.args[3].endsWith('"'));
     assert.deepStrictEqual(invocation.spawnOptions, { windowsVerbatimArguments: true });
   } finally {
     if (oldComSpec === undefined) delete process.env.ComSpec;
