@@ -14,6 +14,8 @@
   ],
   "scripts": {
     "test": "node --check index.js && node test/index.test.js",
+    "check": "npm test && npm run pack:dry-run",
+    "pack:dry-run": "npm pack --dry-run",
     "start": "node index.js"
   },
   "keywords": [

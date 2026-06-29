@@ -98,6 +98,10 @@ node index.js
 node index.js --interactive
 ```
 
+不带参数进入交互模式需要真实 TTY。CI、管道或重定向输入等非 TTY 环境下，请显式传入包名、应用宝详情页 URL、`search` 或 `doctor` 命令。
+
+除 `--help` / `--version` 外，命令成功时 `stdout` 保持 JSON 输出；终端摘要、下载进度和 verbose 调试信息写入 `stderr`，便于配合 `jq`、CI 日志或其他脚本使用。
+
 ### 选项说明
 
 | 选项 | 说明 |
@@ -249,6 +253,9 @@ yyb> doctor
 # HTTP 代理
 node index.js com.example.app --proxy=http://127.0.0.1:7890
 
+# 省略协议时按 HTTP 代理处理
+node index.js com.example.app --proxy=127.0.0.1:7890
+
 # SOCKS5h 代理
 node index.js com.example.app --proxy=socks5h://127.0.0.1:7890
 ```
@@ -270,6 +277,8 @@ node index.js com.example.app --proxy=socks5h://127.0.0.1:7890
 - `curl`：推荐工具，支持 `http/https/socks5/socks5h` 代理。
 - `aria2c`：支持 `http/https` 代理；不支持本工具中的 `socks5/socks5h` 代理配置。
 - `wget`：仅作为兜底；认证代理和 SOCKS 代理会被拒绝，避免凭据泄露或行为不一致。
+
+`--proxy=127.0.0.1:7890` 这类省略协议的输入会自动按 `http://127.0.0.1:7890` 处理。代理账号密码只在必要的下载工具配置输入中传递；错误信息、verbose 日志、子进程环境变量和工具输出都会做脱敏处理。
 
 ---
 
@@ -333,9 +342,10 @@ node index.js com.example.app --proxy=socks5h://127.0.0.1:7890
 
 ```bash
 npm test
+npm run check
 ```
 
-测试覆盖参数解析、搜索结果解析、下载器选择、代理凭据脱敏、交互输入解析，以及不依赖真实网络的 fake `aria2c` 下载链路。GitHub Actions 会在 macOS 15、Linux、Windows 的 Node.js 16 / 20 / 24 上运行同一组测试。
+`npm test` 执行语法检查和单元测试；`npm run check` 会额外执行 `npm pack --dry-run`，用于提交前确认发布包内容。测试覆盖参数解析、搜索结果解析、下载器选择、代理凭据脱敏、交互输入解析，以及不依赖真实网络的 fake `aria2c` 下载链路。GitHub Actions 会在 macOS 15、Linux、Windows 的 Node.js 16 / 20 / 24 上运行同一组测试。
 
 ---
 
