@@ -6,6 +6,7 @@ const path = require('path');
 const {
   buildAria2cDownloadArgs,
   buildAria2cProxyConfigText,
+  buildCommandInvocation,
   buildCurlDownloadArgs,
   buildCurlProxyConfigInput,
   buildSpawnOptions,
@@ -15,6 +16,7 @@ const {
   createColors,
   createChildEnv,
   downloadApk,
+  getCommandCandidates,
   getCurlOutputTarget,
   getDownloadOrder,
   getSupportedSignals,
@@ -606,6 +608,29 @@ test('doctor 环境检查返回工具状态与提示', () => {
 test('curl 预检输出目标按平台选择', () => {
   assert.strictEqual(getCurlOutputTarget('win32'), 'NUL');
   assert.strictEqual(getCurlOutputTarget('darwin'), require('os').devNull);
+});
+test('Windows 命令候选包含 PATHEXT shim 且优先 PATH 路径', () => {
+  const candidates = getCommandCandidates('aria2c', {
+    PATH: 'C:\\fake-bin;C:\\real-bin',
+    PATHEXT: '.EXE;.CMD',
+  }, 'win32');
+  assert.strictEqual(candidates[0], path.win32.join('C:\\fake-bin', 'aria2c'));
+  assert.ok(candidates.includes(path.win32.join('C:\\fake-bin', 'aria2c.cmd')));
+  assert.ok(candidates.indexOf(path.win32.join('C:\\fake-bin', 'aria2c.cmd')) < candidates.indexOf('aria2c'));
+});
+test('Windows .cmd 下载工具通过 cmd.exe 受控执行', () => {
+  const oldComSpec = process.env.ComSpec;
+  process.env.ComSpec = 'C:\\Windows\\System32\\cmd.exe';
+  try {
+    const invocation = buildCommandInvocation('C:\\fake bin\\aria2c.cmd', ['--dir', 'C:\\out dir', 'http://example.com/a.apk?x=1&y=2'], 'win32');
+    assert.strictEqual(invocation.command, 'C:\\Windows\\System32\\cmd.exe');
+    assert.deepStrictEqual(invocation.args.slice(0, 3), ['/d', '/s', '/c']);
+    assert.ok(invocation.args[3].includes('"C:\\fake bin\\aria2c.cmd"'));
+    assert.ok(invocation.args[3].includes('"http://example.com/a.apk?x=1&y=2"'));
+  } finally {
+    if (oldComSpec === undefined) delete process.env.ComSpec;
+    else process.env.ComSpec = oldComSpec;
+  }
 });
 
 section('\n=== 下载器执行 ===');

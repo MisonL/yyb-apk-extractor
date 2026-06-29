@@ -672,6 +672,25 @@ function buildSpawnOptions({ env, stdio, input }) {
   return spawnOptions;
 }
 
+function isWindowsCommandScript(commandPath, platform = process.platform) {
+  return platform === 'win32' && /\.(?:cmd|bat)$/i.test(commandPath);
+}
+
+function quoteCmdArg(value) {
+  return `"${String(value).replace(/"/g, '""')}"`;
+}
+
+function buildCommandInvocation(command, args, platform = process.platform) {
+  if (!isWindowsCommandScript(command, platform)) {
+    return { command, args };
+  }
+  const commandLine = [command, ...args].map(quoteCmdArg).join(' ');
+  return {
+    command: process.env.ComSpec || 'cmd.exe',
+    args: ['/d', '/s', '/c', commandLine],
+  };
+}
+
 function assertAllowedHttpUrl(value, label) {
   let parsed;
   try {
@@ -796,22 +815,47 @@ function findCommand(names) {
   if (commandCache.has(key)) return commandCache.get(key);
 
   for (const name of names) {
-    try {
-      // 直接在 PATH 中执行 --version，成功退出视为可用
-      const res = spawnSync(name, ['--version'], {
-        stdio: 'ignore',
-        timeout: COMMAND_DETECT_TIMEOUT_MS,
-      });
-      if (res.status === 0) {
-        commandCache.set(key, name);
-        return name;
+    for (const command of getCommandCandidates(name)) {
+      try {
+        // 直接在 PATH 中执行 --version，成功退出视为可用
+        const { command: exe, args } = buildCommandInvocation(command, ['--version']);
+        const res = spawnSync(exe, args, {
+          stdio: 'ignore',
+          timeout: COMMAND_DETECT_TIMEOUT_MS,
+        });
+        if (res.status === 0) {
+          commandCache.set(key, command);
+          return command;
+        }
+      } catch {
+        // ignore
       }
-    } catch {
-      // ignore
     }
   }
   commandCache.set(key, null);
   return null;
+}
+
+function getCommandCandidates(name, env = process.env, platform = process.platform) {
+  if (platform !== 'win32' || /[\\/]/.test(name) || path.extname(name)) {
+    return [name];
+  }
+
+  const pathValue = env.PATH || env.Path || env.path || '';
+  const pathExtValue = env.PATHEXT || '.COM;.EXE;.BAT;.CMD';
+  const exts = pathExtValue.split(';').filter(Boolean);
+  const candidates = [];
+  const pathApi = path.win32;
+
+  for (const dir of pathValue.split(';').filter(Boolean)) {
+    candidates.push(pathApi.join(dir, name));
+    for (const ext of exts) {
+      candidates.push(pathApi.join(dir, `${name}${ext.toLowerCase()}`));
+      candidates.push(pathApi.join(dir, `${name}${ext.toUpperCase()}`));
+    }
+  }
+  candidates.push(name);
+  return [...new Set(candidates)];
 }
 
 function collectDoctorInfo({ find = findCommand, platform = process.platform, nodeVersion = process.version } = {}) {
@@ -1542,7 +1586,8 @@ async function downloadApk(apkUrl, pkgName, downloadDir, options = {}) {
     }
     log(options, `执行下载命令: ${exe} ${logArgs.join(' ')}`);
     const spawnOptions = buildSpawnOptions({ env: proxyEnv, stdio, input });
-    const result = spawnSync(exe, args, spawnOptions);
+    const invocation = buildCommandInvocation(exe, args);
+    const result = spawnSync(invocation.command, invocation.args, spawnOptions);
     if (result.error) throw result.error;
     if (result.status !== 0) {
       const stderr = sanitizeProcessOutput(result.stderr);
@@ -2061,6 +2106,7 @@ module.exports = {
   buildAria2cDownloadArgs,
   buildCurlDownloadArgs,
   buildWgetDownloadArgs,
+  buildCommandInvocation,
   buildSpawnOptions,
   collectDoctorInfo,
   createColors,
@@ -2076,6 +2122,7 @@ module.exports = {
   fetchHtmlWithNode,
   findAppInfoFromHtml,
   formatDoctorSummary,
+  getCommandCandidates,
   getCurlOutputTarget,
   getDownloadOrder,
   getSupportedSignals,
