@@ -79,10 +79,19 @@ const CHILD_OUTPUT_MAX_BUFFER = 4 * 1024 * 1024;
 const PROXY_ENV_KEY_SET = new Set(PROXY_ENV_KEYS.map((key) => key.toLowerCase()));
 
 // 终端颜色支持：非 TTY 或设置 NO_COLOR/--no-color 时禁用，保证管道输出干净
-const noColorFlag = process.argv.includes('--no-color');
-const useColor = process.stderr.isTTY && !process.env.NO_COLOR && !noColorFlag;
-const c = useColor
-  ? {
+const COLOR_KEYS = ['reset', 'bold', 'dim', 'red', 'green', 'yellow', 'blue', 'cyan'];
+
+function hasNoColorEnv(env = process.env) {
+  return Object.prototype.hasOwnProperty.call(env, 'NO_COLOR');
+}
+
+function shouldUseColor(stream = process.stderr, argv = process.argv, env = process.env) {
+  return Boolean(stream && stream.isTTY) && !hasNoColorEnv(env) && !argv.includes('--no-color');
+}
+
+function createColors(enabled) {
+  return enabled
+    ? {
       reset: '\x1b[0m',
       bold: '\x1b[1m',
       dim: '\x1b[2m',
@@ -92,15 +101,18 @@ const c = useColor
       blue: '\x1b[34m',
       cyan: '\x1b[36m',
     }
-  : Object.fromEntries(['reset', 'bold', 'dim', 'red', 'green', 'yellow', 'blue', 'cyan'].map((k) => [k, '']));
+    : Object.fromEntries(COLOR_KEYS.map((k) => [k, '']));
+}
+
+const c = createColors(shouldUseColor(process.stderr));
 
 function padEnd(str, len) {
   const visualLen = str.replace(/\x1b\[\d+m/g, '').length;
   return str + ' '.repeat(Math.max(0, len - visualLen));
 }
 
-function opt(name, desc, extra = '') {
-  const line = `  ${c.yellow}${padEnd(name, 22)}${c.reset} ${desc}`;
+function opt(name, desc, extra = '', colors = c) {
+  const line = `  ${colors.yellow}${padEnd(name, 22)}${colors.reset} ${desc}`;
   return extra ? [line, `  ${padEnd('', 22)} ${extra}`] : [line];
 }
 
@@ -114,69 +126,70 @@ function resolveInteractiveDownloadDir(options = {}) {
 }
 
 function showHelp() {
-  const title = `${c.bold}${c.cyan}应用宝 APK 下载链接提取器${c.reset} ${c.dim}v${VERSION}${c.reset}`;
+  const colors = createColors(shouldUseColor(process.stdout));
+  const title = `${colors.bold}${colors.cyan}应用宝 APK 下载链接提取器${colors.reset} ${colors.dim}v${VERSION}${colors.reset}`;
   const lines = [
     '',
     title,
     '',
-    `${c.bold}用法:${c.reset}`,
-    `  ${c.yellow}node index.js${c.reset} ${c.green}<包名>${c.reset} [选项]                 ${c.dim}提取 APK 直链${c.reset}`,
-    `  ${c.yellow}node index.js${c.reset} ${c.green}<应用宝详情页URL>${c.reset} [选项]     ${c.dim}解析后下载到 ${DEFAULT_DOWNLOAD_DIR}${c.reset}`,
-    `  ${c.yellow}node index.js${c.reset}            ${c.dim}无参数时直接进入交互模式${c.reset}`,
-    `  ${c.yellow}node index.js search${c.reset} ${c.green}<关键词>${c.reset} [选项]`,
-    `  ${c.yellow}node index.js doctor${c.reset}      ${c.dim}检查本机下载工具与运行环境${c.reset}`,
-    `  ${c.yellow}node index.js --interactive${c.reset}`,
+    `${colors.bold}用法:${colors.reset}`,
+    `  ${colors.yellow}node index.js${colors.reset} ${colors.green}<包名>${colors.reset} [选项]                 ${colors.dim}提取 APK 直链${colors.reset}`,
+    `  ${colors.yellow}node index.js${colors.reset} ${colors.green}<应用宝详情页URL>${colors.reset} [选项]     ${colors.dim}解析后下载到 ${DEFAULT_DOWNLOAD_DIR}${colors.reset}`,
+    `  ${colors.yellow}node index.js${colors.reset}            ${colors.dim}无参数时直接进入交互模式${colors.reset}`,
+    `  ${colors.yellow}node index.js search${colors.reset} ${colors.green}<关键词>${colors.reset} [选项]`,
+    `  ${colors.yellow}node index.js doctor${colors.reset}      ${colors.dim}检查本机下载工具与运行环境${colors.reset}`,
+    `  ${colors.yellow}node index.js --interactive${colors.reset}`,
     '',
-    `${c.bold}选项:${c.reset}`,
-    ...opt('--proxy=地址', '设置代理, 支持 http/https/socks5/socks5h', `${c.dim}建议 Clash/V2Ray 混合端口用 http:// 或 socks5h://${c.reset}`),
-    ...opt('--no-proxy', '忽略环境变量代理'),
-    ...opt('--download-dir=目录', '指定 APK 下载目录', `${c.dim}包名输入时启用下载; URL 输入时覆盖默认 ${DEFAULT_DOWNLOAD_DIR}${c.reset}`),
-    ...opt('--downloader=工具', '指定下载工具: auto/curl/aria2c/wget'),
-    ...opt('--multi-thread', '优先使用 aria2c 多连接下载'),
-    ...opt('--connections=数量', `aria2c 连接数 (默认 ${MAX_DOWNLOAD_CONNECTIONS}, 范围 1-${MAX_DOWNLOAD_CONNECTIONS})`),
-    ...opt('--timeout=时长', '网络超时时间 (默认 30000)', `${c.dim}可写整数毫秒或带单位的时长, 例如 500ms / 10s / 5m${c.reset}`),
-    ...opt('--insecure', '下载时跳过 HTTPS 证书校验（仅限测试环境）'),
-    ...opt('--verbose, -v', '显示详细调试日志'),
-    ...opt('--interactive, -i', '进入交互式向导'),
-    ...opt('--version, -V', '显示版本号'),
-    ...opt('--no-color', '强制禁用 ANSI 颜色输出'),
-    ...opt('--help, -h', '显示本帮助信息'),
+    `${colors.bold}选项:${colors.reset}`,
+    ...opt('--proxy=地址', '设置代理, 支持 http/https/socks5/socks5h', `${colors.dim}建议 Clash/V2Ray 混合端口用 http:// 或 socks5h://${colors.reset}`, colors),
+    ...opt('--no-proxy', '忽略环境变量代理', '', colors),
+    ...opt('--download-dir=目录', '指定 APK 下载目录', `${colors.dim}包名输入时启用下载; URL 输入时覆盖默认 ${DEFAULT_DOWNLOAD_DIR}${colors.reset}`, colors),
+    ...opt('--downloader=工具', '指定下载工具: auto/curl/aria2c/wget', '', colors),
+    ...opt('--multi-thread', '优先使用 aria2c 多连接下载', '', colors),
+    ...opt('--connections=数量', `aria2c 连接数 (默认 ${MAX_DOWNLOAD_CONNECTIONS}, 范围 1-${MAX_DOWNLOAD_CONNECTIONS})`, '', colors),
+    ...opt('--timeout=时长', '网络超时时间 (默认 30000)', `${colors.dim}可写整数毫秒或带单位的时长, 例如 500ms / 10s / 5m${colors.reset}`, colors),
+    ...opt('--insecure', '下载时跳过 HTTPS 证书校验（仅限测试环境）', '', colors),
+    ...opt('--verbose, -v', '显示详细调试日志', '', colors),
+    ...opt('--interactive, -i', '进入交互式向导', '', colors),
+    ...opt('--version, -V', '显示版本号', '', colors),
+    ...opt('--no-color', '强制禁用 ANSI 颜色输出', '', colors),
+    ...opt('--help, -h', '显示本帮助信息', '', colors),
     '',
-    `${c.bold}示例:${c.reset}`,
-    `  ${c.dim}# 直接输入包名${c.reset}`,
-    `  ${c.yellow}node index.js${c.reset} ${c.green}com.example.app${c.reset}`,
+    `${colors.bold}示例:${colors.reset}`,
+    `  ${colors.dim}# 直接输入包名${colors.reset}`,
+    `  ${colors.yellow}node index.js${colors.reset} ${colors.green}com.example.app${colors.reset}`,
     '',
-    `  ${c.dim}# 输入应用宝详情页 URL${c.reset}`,
-    `  ${c.yellow}node index.js${c.reset} ${c.green}https://sj.qq.com/appdetail/com.example.app${c.reset}`,
-    `  ${c.dim}# URL 会解析后自动下载到 ${DEFAULT_DOWNLOAD_DIR}${c.reset}`,
+    `  ${colors.dim}# 输入应用宝详情页 URL${colors.reset}`,
+    `  ${colors.yellow}node index.js${colors.reset} ${colors.green}https://sj.qq.com/appdetail/com.example.app${colors.reset}`,
+    `  ${colors.dim}# URL 会解析后自动下载到 ${DEFAULT_DOWNLOAD_DIR}${colors.reset}`,
     '',
-    `  ${c.dim}# 搜索应用${c.reset}`,
-    `  ${c.yellow}node index.js search${c.reset} ${c.green}微信${c.reset}`,
+    `  ${colors.dim}# 搜索应用${colors.reset}`,
+    `  ${colors.yellow}node index.js search${colors.reset} ${colors.green}微信${colors.reset}`,
     '',
-    `  ${c.dim}# 进入交互模式${c.reset}`,
-    `  ${c.yellow}node index.js${c.reset}`,
-    `  ${c.dim}# 也可显式使用 --interactive${c.reset}`,
-    `  ${c.yellow}node index.js --interactive${c.reset}`,
+    `  ${colors.dim}# 进入交互模式${colors.reset}`,
+    `  ${colors.yellow}node index.js${colors.reset}`,
+    `  ${colors.dim}# 也可显式使用 --interactive${colors.reset}`,
+    `  ${colors.yellow}node index.js --interactive${colors.reset}`,
     '',
-    `  ${c.dim}# 使用 HTTP 代理 (推荐)${c.reset}`,
-    `  ${c.yellow}node index.js${c.reset} ${c.green}com.example.app${c.reset} --proxy=${c.cyan}http://127.0.0.1:7890${c.reset}`,
+    `  ${colors.dim}# 使用 HTTP 代理 (推荐)${colors.reset}`,
+    `  ${colors.yellow}node index.js${colors.reset} ${colors.green}com.example.app${colors.reset} --proxy=${colors.cyan}http://127.0.0.1:7890${colors.reset}`,
     '',
-    `  ${c.dim}# 使用 SOCKS5h 代理 (远程 DNS)${c.reset}`,
-    `  ${c.yellow}node index.js${c.reset} ${c.green}com.example.app${c.reset} --proxy=${c.cyan}socks5h://127.0.0.1:7890${c.reset}`,
+    `  ${colors.dim}# 使用 SOCKS5h 代理 (远程 DNS)${colors.reset}`,
+    `  ${colors.yellow}node index.js${colors.reset} ${colors.green}com.example.app${colors.reset} --proxy=${colors.cyan}socks5h://127.0.0.1:7890${colors.reset}`,
     '',
-    `  ${c.dim}# 自动下载到指定目录${c.reset}`,
-    `  ${c.yellow}node index.js${c.reset} ${c.green}com.example.app${c.reset} --download-dir=${c.cyan}./downloads${c.reset}`,
+    `  ${colors.dim}# 自动下载到指定目录${colors.reset}`,
+    `  ${colors.yellow}node index.js${colors.reset} ${colors.green}com.example.app${colors.reset} --download-dir=${colors.cyan}./downloads${colors.reset}`,
     '',
-    `  ${c.dim}# 使用 aria2c 多连接下载大 APK${c.reset}`,
-    `  ${c.yellow}node index.js${c.reset} ${c.green}com.example.app${c.reset} --download-dir=${c.cyan}./downloads${c.reset} --multi-thread --connections=${c.cyan}8${c.reset}`,
+    `  ${colors.dim}# 使用 aria2c 多连接下载大 APK${colors.reset}`,
+    `  ${colors.yellow}node index.js${colors.reset} ${colors.green}com.example.app${colors.reset} --download-dir=${colors.cyan}./downloads${colors.reset} --multi-thread --connections=${colors.cyan}8${colors.reset}`,
     '',
-    `  ${c.dim}# 检查本机环境${c.reset}`,
-    `  ${c.yellow}node index.js doctor${c.reset}`,
+    `  ${colors.dim}# 检查本机环境${colors.reset}`,
+    `  ${colors.yellow}node index.js doctor${colors.reset}`,
     '',
-    `${c.bold}环境变量:${c.reset}`,
-    `  ${c.cyan}HTTPS_PROXY${c.reset} / ${c.cyan}https_proxy${c.reset} / ${c.cyan}HTTP_PROXY${c.reset} / ${c.cyan}http_proxy${c.reset}`,
-    `  ${c.cyan}ALL_PROXY${c.reset} / ${c.cyan}all_proxy${c.reset}`,
-    `  ${c.dim}按上述优先级自动读取默认代理${c.reset}`,
+    `${colors.bold}环境变量:${colors.reset}`,
+    `  ${colors.cyan}HTTPS_PROXY${colors.reset} / ${colors.cyan}https_proxy${colors.reset} / ${colors.cyan}HTTP_PROXY${colors.reset} / ${colors.cyan}http_proxy${colors.reset}`,
+    `  ${colors.cyan}ALL_PROXY${colors.reset} / ${colors.cyan}all_proxy${colors.reset}`,
+    `  ${colors.dim}按上述优先级自动读取默认代理${colors.reset}`,
     '',
   ];
   console.log(lines.join('\n'));
@@ -2050,6 +2063,7 @@ module.exports = {
   buildWgetDownloadArgs,
   buildSpawnOptions,
   collectDoctorInfo,
+  createColors,
   createChildEnv,
   cleanupTempFiles,
   buildAria2cProxyConfigText,
@@ -2102,6 +2116,7 @@ module.exports = {
   sanitizeTerminalOutput,
   sanitizeProcessOutput,
   searchApps,
+  shouldUseColor,
   splitProxyAuth,
   timeoutSeconds,
   validateDownloadDir,

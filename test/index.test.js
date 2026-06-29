@@ -12,6 +12,7 @@ const {
   buildWgetDownloadArgs,
   collectDoctorInfo,
   cleanupTempFiles,
+  createColors,
   createChildEnv,
   downloadApk,
   getCurlOutputTarget,
@@ -51,6 +52,7 @@ const {
   splitProxyAuth,
   handleInteractiveTimeout,
   createReadline,
+  shouldUseColor,
 } = require('../index.js');
 
 const testQueue = [];
@@ -124,6 +126,21 @@ test('危险字符拒绝', () => {
 });
 
 section('\n=== 终端输出净化 ===');
+test('NO_COLOR 只要存在就禁用颜色', () => {
+  assert.strictEqual(shouldUseColor({ isTTY: true }, ['node', 'index.js'], {}), true);
+  assert.strictEqual(shouldUseColor({ isTTY: true }, ['node', 'index.js'], { NO_COLOR: '1' }), false);
+  assert.strictEqual(shouldUseColor({ isTTY: true }, ['node', 'index.js'], { NO_COLOR: '' }), false);
+  assert.strictEqual(shouldUseColor({ isTTY: false }, ['node', 'index.js'], {}), false);
+  assert.strictEqual(shouldUseColor({ isTTY: true }, ['node', 'index.js', '--no-color'], {}), false);
+});
+
+test('禁用颜色时 ANSI 码为空', () => {
+  const colors = createColors(false);
+  assert.strictEqual(colors.bold, '');
+  assert.strictEqual(colors.cyan, '');
+  assert.strictEqual(colors.reset, '');
+});
+
 test('ANSI 转义序列被过滤', () => {
   assert.strictEqual(sanitizeTerminalOutput('\x1b[31m微信\x1b[0m'), '微信');
 });
