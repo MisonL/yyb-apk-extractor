@@ -691,7 +691,7 @@ function buildCommandInvocation(command, args, platform = process.platform) {
   const commandLine = [command, ...args].map(quoteCmdArg).join(' ');
   return {
     command: process.env.ComSpec || 'cmd.exe',
-    args: ['/d', '/s', '/c', commandLine],
+    args: ['/d', '/c', `call ${commandLine}`],
   };
 }
 
