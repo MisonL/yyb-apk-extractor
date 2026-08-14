@@ -1,0 +1,44 @@
+# 知识卡导出索引文件
+schema_version: 1
+locale: zh-CN
+branch: Q0DeR-MaG1C-BrAnCh-Fo2-NoN-GiT-Or-No-C0MmIt
+nodes_managed: true
+exported_at: "2026-08-14T07:43:25Z"
+modules:
+    "":
+        dir_name: 根目录杂项文件集合
+        title: 根目录杂项文件集合
+        scope:
+            - qdm_tls12_enable.reg
+            - qdm_tls12_restore.reg
+            - create_oa_guide_doc.py
+            - OA流程填写指引-办公电脑权限申请.docx
+            - boards_current_20260629.json
+            - electricity_focus_boards.json
+            - electricity_summer_rotation.json
+            - market_20260629_bkzj.json
+            - 菜亿箩.apk
+        source_files: []
+        children:
+            - apk_extractor
+            - firecrawl_research_data
+        depends_on: []
+        related_to: []
+    apk_extractor:
+        dir_name: 应用宝 APK 直链提取 CLI 工具
+        title: 应用宝 APK 直链提取 CLI 工具
+        scope:
+            - yyb-apk-extractor/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []
+    firecrawl_research_data:
+        dir_name: Firecrawl 研究数据快照集
+        title: Firecrawl 研究数据快照集
+        scope:
+            - .firecrawl/
+        source_files: []
+        children: []
+        depends_on: []
+        related_to: []

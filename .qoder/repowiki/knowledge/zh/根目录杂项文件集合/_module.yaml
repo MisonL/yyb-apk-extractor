@@ -1,0 +1,16 @@
+schema_version: 1
+module_path: ""
+title: 根目录杂项文件集合
+scope:
+    - qdm_tls12_enable.reg
+    - qdm_tls12_restore.reg
+    - create_oa_guide_doc.py
+    - OA流程填写指引-办公电脑权限申请.docx
+    - boards_current_20260629.json
+    - electricity_focus_boards.json
+    - electricity_summer_rotation.json
+    - market_20260629_bkzj.json
+    - 菜亿箩.apk
+source_files: []
+depends_on: []
+related_to: []

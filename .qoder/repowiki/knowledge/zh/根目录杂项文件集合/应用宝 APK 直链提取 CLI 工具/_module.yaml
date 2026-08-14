@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: apk_extractor
+title: 应用宝 APK 直链提取 CLI 工具
+scope:
+    - yyb-apk-extractor/
+source_files: []
+depends_on: []
+related_to: []

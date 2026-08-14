@@ -1,0 +1,8 @@
+schema_version: 1
+module_path: firecrawl_research_data
+title: Firecrawl 研究数据快照集
+scope:
+    - .firecrawl/
+source_files: []
+depends_on: []
+related_to: []
