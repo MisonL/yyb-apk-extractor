@@ -1079,6 +1079,36 @@ function assertAllowedHostname(hostname, context) {
   }
 }
 
+function isIpHost(hostname) {
+  const h = hostname.toLowerCase();
+  if (h.includes(':')) return true; // IPv6（port 已被 URL 解析剥离，含 : 只可能是 IPv6）
+  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(h);
+}
+
+// 腾讯 BEIDOU 下载调度固定格式：302 Location 形如
+//   http://<运营商IP>:49155/imtt.dd.qq.com/sjy.../xxx.apk?mkey=...
+// 主机是纯 IP，但路径首段固定为 /imtt.dd.qq.com/，据此识别并放行；其余 IP 目标一律拒绝
+function assertAllowedDownloadRedirectTarget(target, context) {
+  const h = target.hostname.toLowerCase();
+  if (h.endsWith('.qq.com') || h === 'qq.com') return;
+  if (isIpHost(h) && target.pathname.startsWith('/imtt.dd.qq.com/')) return;
+  throw new Error(`${context} 非腾讯域名或缺少 CDN 标识 (${target.host || target.hostname})，已拒绝`);
+}
+
+function assertAllowedDownloadHttpUrl(value, label) {
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`${label} 不是有效 URL: ${value}`);
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`${label} 仅支持 http/https 协议: ${value}`);
+  }
+  assertAllowedDownloadRedirectTarget(parsed, label);
+  return parsed;
+}
+
 function fetchHtmlWithNode(url, options, redirectCount = 0) {
   if (redirectCount > 5) {
     return Promise.reject(new Error('重定向次数过多（>5），疑似配置错误'));
@@ -1412,13 +1442,16 @@ function resolveDownloadRedirects(url, options, redirectCount = 0) {
     throw new Error('APK 下载重定向次数过多（>5），疑似配置错误');
   }
 
-  const safeUrl = assertAllowedHttpUrl(url, 'APK 下载地址').toString();
+  const safeUrl = assertAllowedDownloadHttpUrl(url, 'APK 下载地址').toString();
   const curl = findCommand(['curl']);
   if (!curl) return safeUrl;
 
   const timeoutSec = timeoutSeconds(options);
   const args = [
     '-s',
+    // 用 GET + Range 首字节探测：调度 CDN 仅对 GET 返回 302（HEAD 会直接 200 导致拿不到真实下载地址），
+    // Range 0-0 保证 200/206 响应只传输 1 字节，避免把整个 APK 下载到空设备（慢速网络下预检自身会超时失败）
+    '-r', '0-0',
     '-D', '-',
     '-o', getCurlOutputTarget(),
     '--connect-timeout', timeoutSec,
@@ -1467,9 +1500,9 @@ function resolveDownloadRedirects(url, options, redirectCount = 0) {
     if (!locationMatch) {
       throw new Error(`APK 下载地址返回 HTTP ${statusCode} 但缺少 Location`);
     }
-    const nextUrl = new URL(locationMatch[1].trim(), safeUrl).toString();
-    assertAllowedHttpUrl(nextUrl, 'APK 下载重定向');
-    return resolveDownloadRedirects(nextUrl, options, redirectCount + 1);
+    const nextUrl = new URL(locationMatch[1].trim(), safeUrl);
+    assertAllowedDownloadRedirectTarget(nextUrl, 'APK 下载重定向');
+    return resolveDownloadRedirects(nextUrl.toString(), options, redirectCount + 1);
   }
 
   if (statusCode === 405 || statusCode === 501) {
@@ -2196,6 +2229,8 @@ if (require.main === module) {
 }
 
 module.exports = {
+  assertAllowedDownloadHttpUrl,
+  assertAllowedDownloadRedirectTarget,
   assertAllowedHttpUrl,
   assertAllowedHostname,
   buildAria2cDownloadArgs,

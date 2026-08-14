@@ -5,6 +5,8 @@ const { spawnSync } = require('child_process');
 
 // 加载被测模块（不触发 CLI 主流程）
 const {
+  assertAllowedDownloadHttpUrl,
+  assertAllowedDownloadRedirectTarget,
   buildAria2cDownloadArgs,
   buildAria2cProxyConfigText,
   buildCommandInvocation,
@@ -205,6 +207,29 @@ test('非腾讯域名拒绝', () => {
 });
 test('非 http/https 协议拒绝', () => {
   assert.strictEqual(safeTencentUrl('ftp://imtt.dd.qq.com/xxx.apk'), '');
+});
+test('BEIDOU 调度 IP 重定向（带 /imtt.dd.qq.com/ 路径标识）放行', () => {
+  const u = assertAllowedDownloadHttpUrl(
+    'http://113.96.145.130:49155/imtt.dd.qq.com/sjy.00022/sjy.00004/16891/apk/971F8A.apk?mkey=abc',
+    'APK 下载重定向'
+  );
+  assert.strictEqual(u.hostname, '113.96.145.130');
+});
+test('BEIDOU 调度 IPv6 重定向放行', () => {
+  const u = new URL('http://[::ffff:113.96.145.130]:49155/imtt.dd.qq.com/sjy/xxx.apk');
+  assert.doesNotThrow(() => assertAllowedDownloadRedirectTarget(u, 'APK 下载重定向'));
+});
+test('缺少 CDN 路径标识的 IP 重定向拒绝', () => {
+  const u = new URL('http://113.96.145.130:49155/16891/apk/971F8A.apk');
+  assert.throws(() => assertAllowedDownloadRedirectTarget(u, 'APK 下载重定向'), /已拒绝/);
+});
+test('非腾讯域名重定向拒绝', () => {
+  const u = new URL('http://evil.com/imtt.dd.qq.com/xxx.apk');
+  assert.throws(() => assertAllowedDownloadRedirectTarget(u, 'APK 下载重定向'), /已拒绝/);
+});
+test('qq.com 域名下载地址照常放行', () => {
+  const u = assertAllowedDownloadHttpUrl('http://imtt.dd.qq.com/sjy.00022/xxx.apk', 'APK 下载地址');
+  assert.strictEqual(u.hostname, 'imtt.dd.qq.com');
 });
 test('allowedHosts 仅支持星号通配符且其他正则元字符按字面量处理', () => {
   assert.strictEqual(safeTencentUrl('http://safe.example.com.evil.com/a.apk', ['safe.example.com']), '');
