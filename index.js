@@ -1506,7 +1506,7 @@ function resolveDownloadRedirects(url, options, redirectCount = 0) {
   }
 
   if (statusCode === 405 || statusCode === 501) {
-    log(options, `服务器不支持 HEAD 预检，使用原始下载地址: ${safeUrl}`);
+    log(options, `预检请求被服务器拒绝 (HTTP ${statusCode})，降级使用原始下载地址: ${safeUrl}`);
     return safeUrl;
   }
 
